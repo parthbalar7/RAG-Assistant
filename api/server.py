@@ -3,10 +3,13 @@ import os
 import tempfile
 import time
 import json
+import asyncio
+import threading
+import queue as stdlib_queue
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,7 +29,7 @@ from core.memory import (
     process_session_summary, MemoryFragment, optimize_context_chunks,
 )
 from api import database as db
-from api.auth import hash_password, verify_password, create_token, get_current_user
+from api.auth import hash_password, verify_password, create_token, get_current_user, require_auth, decode_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -107,13 +110,13 @@ async def me(user=Depends(get_current_user)):
 # ── Session Endpoints ──
 
 @app.post("/api/sessions")
-async def create_session(user=Depends(get_current_user)):
-    return db.create_session(user["id"] if user else "anonymous")
+async def create_session(user=Depends(require_auth)):
+    return db.create_session(user["id"])
 
 
 @app.get("/api/sessions")
-async def list_sessions(user=Depends(get_current_user)):
-    return {"sessions": db.get_user_sessions(user["id"] if user else "anonymous")}
+async def list_sessions(user=Depends(require_auth)):
+    return {"sessions": db.get_user_sessions(user["id"])}
 
 
 @app.get("/api/sessions/{sid}/messages")
@@ -191,8 +194,8 @@ async def upload(files: list[UploadFile] = File(...)):
 
 
 @app.post("/api/query")
-async def query(req: QueryReq, user=Depends(get_current_user)):
-    if not store or store.count == 0:
+async def query(req: QueryReq, user=Depends(require_auth)):
+    if not req.use_pageindex and (not store or store.count == 0):
         raise HTTPException(400, "No documents indexed")
     start = time.perf_counter()
     uid = user["id"] if user else None
@@ -264,25 +267,28 @@ async def query(req: QueryReq, user=Depends(get_current_user)):
 
 
 @app.post("/api/query/stream")
-async def query_stream(req: QueryReq, user=Depends(get_current_user)):
-    if not store or store.count == 0:
+async def query_stream(req: QueryReq, user=Depends(require_auth)):
+    if not req.use_pageindex and (not store or store.count == 0):
         raise HTTPException(400, "No documents indexed")
+    uid = user["id"]
     route = route_query_fast(req.query) if req.use_routing else None
     top_k = req.top_k or (route.suggested_top_k if route else settings.top_k)
-    hits = retrieve(store=store, query=req.query, top_k=top_k,
-                    use_reranking=req.use_reranking, use_hybrid=req.use_hybrid)
-    sources = [{"file": h["metadata"].get("document_path", ""),
-                "lines": f"{h['metadata'].get('start_line','?')}-{h['metadata'].get('end_line','?')}",
-                "language": h["metadata"].get("language", ""),
-                "score": round(h.get("rerank_score", h.get("score", 0)), 4),
-                "search_type": h.get("search_type", ""), "preview": h["content"][:200]} for h in hits]
+    hits = []
+    sources = []
+    if not req.use_pageindex:
+        hits = retrieve(store=store, query=req.query, top_k=top_k,
+                        use_reranking=req.use_reranking, use_hybrid=req.use_hybrid)
+        sources = [{"file": h["metadata"].get("document_path", ""),
+                    "lines": f"{h['metadata'].get('start_line','?')}-{h['metadata'].get('end_line','?')}",
+                    "language": h["metadata"].get("language", ""),
+                    "score": round(h.get("rerank_score", h.get("score", 0)), 4),
+                    "search_type": h.get("search_type", ""), "preview": h["content"][:200]} for h in hits]
     hist = [Message(role=m["role"], content=m["content"]) for m in req.conversation_history] if req.conversation_history else None
 
     optimized_hits = optimize_context_chunks(hits)
 
     # Memory retrieval for streaming
     memory_ctx = None
-    uid = user["id"] if user else "anonymous"
     if req.use_memory and settings.memory_enabled:
         try:
             mem_store = get_memory_store(uid)
@@ -291,6 +297,7 @@ async def query_stream(req: QueryReq, user=Depends(get_current_user)):
             logger.warning("Memory retrieval failed: {}".format(me))
 
     collected_answer = []
+    is_first_message = not req.conversation_history
 
     def stream():
         yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
@@ -301,16 +308,172 @@ async def query_stream(req: QueryReq, user=Depends(get_current_user)):
         for chunk in generate_stream(query=req.query, hits=optimized_hits, conversation_history=hist, memory_context=memory_ctx):
             collected_answer.append(chunk)
             yield f"data: {json.dumps({'type': 'token', 'token': chunk})}\n\n"
+        full_answer = "".join(collected_answer)
+        # Save conversation to DB
+        if req.session_id:
+            db.add_message(req.session_id, "user", req.query)
+            db.add_message(req.session_id, "assistant", full_answer, sources)
+            if is_first_message:
+                title = req.query[:50] + ('...' if len(req.query) > 50 else '')
+                db.update_session_title(req.session_id, title)
+                yield f"data: {json.dumps({'type': 'session_renamed', 'title': title})}\n\n"
         # Memory extraction after streaming (respects interval)
         if settings.memory_enabled and settings.memory_auto_extract:
             try:
-                full_answer = "".join(collected_answer)
                 process_turn_memories(uid, req.query, full_answer, req.session_id or "")
             except Exception as me:
                 logger.warning("Memory extraction failed: {}".format(me))
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.websocket("/ws/query")
+async def ws_query_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            raw = await websocket.receive_json()
+
+            # Authenticate via token in message payload
+            token_str = raw.get("token", "")
+            user = None
+            if token_str:
+                payload = decode_token(token_str)
+                if payload:
+                    user = db.get_user_by_id(payload["sub"])
+
+            if not user:
+                await websocket.send_json({"type": "error", "message": "Authentication required"})
+                continue
+
+            uid = user["id"]
+            qd = raw.get("query_data", {})
+            query_text = qd.get("query", "")
+            session_id = qd.get("session_id")
+            conv_history = qd.get("conversation_history") or []
+            use_pi = bool(qd.get("use_pageindex") and qd.get("pageindex_doc_id"))
+            pi_doc = qd.get("pageindex_doc_id")
+            use_reranking = qd.get("use_reranking", True)
+            use_hybrid = qd.get("use_hybrid", True)
+            use_routing = qd.get("use_routing", True)
+            use_memory = qd.get("use_memory", True)
+            top_k_req = qd.get("top_k")
+            is_first = not conv_history
+
+            if not query_text:
+                await websocket.send_json({"type": "error", "message": "Empty query"})
+                continue
+
+            if not use_pi and (not store or store.count == 0):
+                await websocket.send_json({"type": "error", "message": "No documents indexed"})
+                continue
+
+            try:
+                if use_pi and pi_doc:
+                    # ── PageIndex path ──────────────────────────────────────
+                    await websocket.send_json({"type": "sources", "sources": []})
+                    await websocket.send_json({"type": "route", "route": {"category": "pageindex", "strategy": "tree_reasoning"}})
+                    result = await asyncio.to_thread(
+                        pindex.chat_query, query_text,
+                        doc_id=pi_doc, conversation_history=conv_history
+                    )
+                    answer = result["answer"]
+                    # Send word-by-word to simulate streaming
+                    for tok in answer.split(' '):
+                        await websocket.send_json({"type": "token", "token": tok + ' '})
+                    if session_id:
+                        db.add_message(session_id, "user", query_text)
+                        db.add_message(session_id, "assistant", answer)
+                        if is_first:
+                            title = query_text[:50] + ('...' if len(query_text) > 50 else '')
+                            db.update_session_title(session_id, title)
+                            await websocket.send_json({"type": "session_renamed", "title": title})
+                else:
+                    # ── Standard RAG path ───────────────────────────────────
+                    route = route_query_fast(query_text) if use_routing else None
+                    top_k = top_k_req or (route.suggested_top_k if route else settings.top_k)
+
+                    hits = await asyncio.to_thread(
+                        retrieve, store=store, query=query_text, top_k=top_k,
+                        use_reranking=use_reranking, use_hybrid=use_hybrid
+                    )
+                    sources = [{"file": h["metadata"].get("document_path", ""),
+                                "lines": f"{h['metadata'].get('start_line','?')}-{h['metadata'].get('end_line','?')}",
+                                "language": h["metadata"].get("language", ""),
+                                "score": round(h.get("rerank_score", h.get("score", 0)), 4),
+                                "search_type": h.get("search_type", ""), "preview": h["content"][:200]} for h in hits]
+                    hist = [Message(role=m["role"], content=m["content"]) for m in conv_history] if conv_history else None
+                    optimized_hits = optimize_context_chunks(hits)
+
+                    # Memory retrieval
+                    memory_ctx = None
+                    if use_memory and settings.memory_enabled:
+                        try:
+                            mem_store = get_memory_store(uid)
+                            memory_ctx = retrieve_memories(mem_store, query_text)
+                        except Exception as me:
+                            logger.warning("Memory retrieval failed: {}".format(me))
+
+                    await websocket.send_json({"type": "sources", "sources": sources})
+                    if route:
+                        await websocket.send_json({"type": "route", "route": {"category": route.category, "strategy": route.retrieval_strategy}})
+                    if memory_ctx and memory_ctx.count > 0:
+                        await websocket.send_json({"type": "memories", "count": memory_ctx.count})
+
+                    # Stream tokens via thread + queue bridge
+                    token_queue: stdlib_queue.Queue = stdlib_queue.Queue()
+
+                    def producer():
+                        try:
+                            for chunk in generate_stream(query=query_text, hits=optimized_hits,
+                                                         conversation_history=hist, memory_context=memory_ctx):
+                                token_queue.put(("token", chunk))
+                        except Exception as e:
+                            token_queue.put(("error", str(e)))
+                        finally:
+                            token_queue.put(("done", None))
+
+                    threading.Thread(target=producer, daemon=True).start()
+
+                    collected_answer = []
+                    while True:
+                        item_type, item_val = await asyncio.to_thread(token_queue.get)
+                        if item_type == "done":
+                            break
+                        elif item_type == "error":
+                            await websocket.send_json({"type": "error", "message": item_val})
+                            break
+                        else:
+                            collected_answer.append(item_val)
+                            await websocket.send_json({"type": "token", "token": item_val})
+
+                    full_answer = "".join(collected_answer)
+
+                    if session_id:
+                        db.add_message(session_id, "user", query_text)
+                        db.add_message(session_id, "assistant", full_answer, sources)
+                        if is_first:
+                            title = query_text[:50] + ('...' if len(query_text) > 50 else '')
+                            db.update_session_title(session_id, title)
+                            await websocket.send_json({"type": "session_renamed", "title": title})
+
+                    if settings.memory_enabled and settings.memory_auto_extract:
+                        try:
+                            await asyncio.to_thread(process_turn_memories, uid, query_text, full_answer, session_id or "")
+                        except Exception as me:
+                            logger.warning("Memory extraction failed: {}".format(me))
+
+                await websocket.send_json({"type": "done"})
+
+            except Exception as e:
+                logger.error(f"WS query processing error: {e}")
+                await websocket.send_json({"type": "error", "message": str(e)})
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket session error: {e}")
 
 
 @app.get("/api/files")

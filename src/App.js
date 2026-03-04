@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_API_URL || '';
+const WS_URL = (process.env.REACT_APP_API_URL || window.location.origin).replace(/^http/, 'ws') + '/ws/query';
 
 /* Helper to extract error message from FastAPI response */
 function extractError(d, fallback) {
@@ -59,24 +60,32 @@ const api = {
 };
 
 async function* streamQuery(query, history, opts, token) {
-  const h = { 'Content-Type': 'application/json' };
-  if (token) h['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(API + '/api/query/stream', { method: 'POST', headers: h, body: JSON.stringify({ query, conversation_history: history, ...opts }) });
-  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(extractError(d, r.statusText)); }
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() || '';
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try { yield JSON.parse(line.slice(6)); } catch (e) { /* skip */ }
+  const ws = new WebSocket(WS_URL);
+  const evQueue = [];
+  let notify = null;
+  let wsError = null;
+
+  const enqueue = (item) => { evQueue.push(item); if (notify) { notify(); notify = null; } };
+
+  ws.onopen = () => ws.send(JSON.stringify({ token, query_data: { query, conversation_history: history, ...opts } }));
+  ws.onmessage = (e) => { try { enqueue({ value: JSON.parse(e.data) }); } catch {} };
+  ws.onclose = () => enqueue({ done: true });
+  ws.onerror = () => { wsError = new Error('WebSocket connection failed'); enqueue({ done: true }); };
+
+  const wait = () => new Promise(r => { if (evQueue.length > 0) r(); else notify = r; });
+
+  try {
+    while (true) {
+      await wait();
+      while (evQueue.length > 0) {
+        const item = evQueue.shift();
+        if (item.done) { if (wsError) throw wsError; return; }
+        yield item.value;
+        if (item.value.type === 'done') return;
       }
     }
+  } finally {
+    if (ws.readyState < 2) ws.close();
   }
 }
 
@@ -215,7 +224,7 @@ function Toasts({ toasts, onDismiss }) {
 }
 
 /* ── Auth Modal ── */
-function AuthModal({ onClose, onAuth }) {
+function AuthModal({ onClose, onAuth, required }) {
   const [tab, setTab] = useState('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -235,10 +244,10 @@ function AuthModal({ onClose, onAuth }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={required ? undefined : onClose}>
       <div className="modal" onClick={e => e.stopPropagation()} style={{ width: 400 }}>
         <h2>{tab === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
-        <p>Sign in to save your chat history and preferences.</p>
+        <p>{required ? 'Sign in or register to use RAG Assistant.' : 'Sign in to save your chat history and preferences.'}</p>
         <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
           <button className={'modal-btn ' + (tab === 'login' ? 'confirm' : 'cancel')} style={{ flex: 1 }} onClick={() => setTab('login')}>Login</button>
           <button className={'modal-btn ' + (tab === 'register' ? 'confirm' : 'cancel')} style={{ flex: 1 }} onClick={() => setTab('register')}>Register</button>
@@ -249,7 +258,7 @@ function AuthModal({ onClose, onAuth }) {
         {tab === 'register' && <input type="text" placeholder="Display name (optional)" value={displayName} onChange={e => setDisplayName(e.target.value)} />}
         {error && <div className="result-banner error"><AlertCircle size={12} /> {error}</div>}
         <div className="modal-actions">
-          <button className="modal-btn cancel" onClick={onClose}>Cancel</button>
+          {!required && <button className="modal-btn cancel" onClick={onClose}>Cancel</button>}
           <button className="modal-btn confirm" onClick={submit} disabled={loading || !username || !password}>
             {loading ? '...' : tab === 'login' ? 'Login' : 'Register'}
           </button>
@@ -834,9 +843,9 @@ function IntegrityRadarPanel({ token, addToast, isReady }) {
 }
 
 
-function FileTreePanel() {
+function FileTreePanel({ refreshKey }) {
   const [files, setFiles] = useState([]);
-  useEffect(() => { api.get('/api/files').then(d => setFiles(d.files || [])).catch(() => {}); }, []);
+  useEffect(() => { api.get('/api/files').then(d => setFiles(d.files || [])).catch(() => {}); }, [refreshKey]);
   const tree = {};
   files.forEach(function(f) {
     const parts = f.path.split('/');
@@ -1107,6 +1116,7 @@ export default function App() {
   const [showIngest, setShowIngest] = useState(false);
   const [toasts, setToasts] = useState([]);
   const toastId = useRef(0);
+  const [filesRefreshKey, setFilesRefreshKey] = useState(0);
 
   // Settings
   const [useReranking, setUseReranking] = useState(true);
@@ -1185,15 +1195,24 @@ export default function App() {
       setStreaming(true);
       let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0 };
       setMessages(p => [...p, msg]);
+      const isFirstMsg = messages.length === 0;
       try {
         for await (const ev of streamQuery(q, getHistory(), opts, token)) {
           if (ev.type === 'sources') msg = { ...msg, sources: ev.sources };
           else if (ev.type === 'route') msg = { ...msg, route: ev.route };
           else if (ev.type === 'memories') msg = { ...msg, memoriesUsed: ev.count };
           else if (ev.type === 'token') msg = { ...msg, content: msg.content + ev.token };
-          setMessages(p => [...p.slice(0, -1), { ...msg }]);
+          else if (ev.type === 'session_renamed') {
+            setSessions(p => p.map(s => s.id === sid ? { ...s, title: ev.title } : s));
+          } else if (ev.type === 'error') { addToast('error', ev.message); }
+          if (ev.type !== 'session_renamed') setMessages(p => [...p.slice(0, -1), { ...msg }]);
         }
       } catch (e) { addToast('error', e.message); msg = { ...msg, content: msg.content + '\n\n**Error:** ' + e.message }; setMessages(p => [...p.slice(0, -1), { ...msg }]); }
+      // Frontend fallback: name session from first message if backend didn't emit session_renamed
+      if (isFirstMsg && sid) {
+        const title = q.slice(0, 50) + (q.length > 50 ? '...' : '');
+        setSessions(p => p.map(s => s.id === sid && (s.title === 'New Chat' || !s.title) ? { ...s, title } : s));
+      }
       setStreaming(false);
     } else {
       setLoading(true);
@@ -1201,9 +1220,9 @@ export default function App() {
         const r = await api.post('/api/query', { query: q, conversation_history: getHistory(), ...opts }, token);
         setMessages(p => [...p, { role: 'assistant', content: r.answer, sources: r.sources, meta: { model: r.model, latency: r.latency_ms, usage: r.usage }, route: r.route, memoriesUsed: r.memories_used || 0 }]);
         if (sid && messages.length === 0) {
-          const title = q.slice(0, 40) + (q.length > 40 ? '...' : '');
-          api.put('/api/sessions/' + sid, { title: title }, token).catch(() => {});
-          fetchSessions();
+          const title = q.slice(0, 50) + (q.length > 50 ? '...' : '');
+          api.put('/api/sessions/' + sid, { title }, token).catch(() => {});
+          setSessions(p => p.map(s => s.id === sid ? { ...s, title } : s));
         }
       } catch (e) { addToast('error', e.message); setMessages(p => [...p, { role: 'assistant', content: '**Error:** ' + e.message }]); }
       setLoading(false);
@@ -1211,8 +1230,19 @@ export default function App() {
     fetchSessions();
   };
 
-  const isReady = stats && stats.document_count > 0;
+  const hasIndexedDocs = stats && stats.document_count > 0;
+  const isReady = hasIndexedDocs || (usePageIndex && !!piActiveDoc);
   const prompts = ["How is the project structured?", "What API endpoints exist?", "Explain the config options", "Show error handling patterns"];
+
+  // Auth gate — block entire app until logged in
+  if (!token) {
+    return (
+      <>
+        <AuthModal required onClose={() => {}} onAuth={handleAuth} />
+        <Toasts toasts={toasts} onDismiss={id => setToasts(p => p.filter(t => t.id !== id))} />
+      </>
+    );
+  }
 
   return (
     <div className="app-layout">
@@ -1234,7 +1264,7 @@ export default function App() {
         </div>
         <div className="sl-footer">
           <button className="sl-footer-btn" onClick={() => setShowIngest(true)}><FolderOpen size={12} /> Index Documents</button>
-          <button className="sl-footer-btn danger" onClick={async () => { if (window.confirm('Clear all indexed docs?')) { await api.del('/api/collection', token); fetchStats(); addToast('info', 'Collection cleared'); } }}><Trash2 size={12} /> Clear Collection</button>
+          <button className="sl-footer-btn danger" onClick={async () => { if (window.confirm('Clear all indexed docs?')) { await api.del('/api/collection', token); fetchStats(); setFilesRefreshKey(k => k + 1); addToast('info', 'Collection cleared'); } }}><Trash2 size={12} /> Clear Collection</button>
           {user
             ? <button className="sl-footer-btn" onClick={handleLogout}><LogOut size={12} /> {user.display_name}</button>
             : <button className="sl-footer-btn" onClick={() => setShowAuth(true)}><LogIn size={12} /> Sign In</button>}
@@ -1247,7 +1277,7 @@ export default function App() {
       <main className="main-content">
         <div className="topbar">
           <button className="topbar-btn" onClick={() => setLeftOpen(!leftOpen)}><Menu size={16} /></button>
-          <span className="topbar-title">{isReady ? stats.document_count + ' chunks indexed' : 'Index documents to start'}</span>
+          <span className="topbar-title">{hasIndexedDocs ? stats.document_count + ' chunks indexed' : usePageIndex && piActiveDoc ? 'Tree search active' : 'Index documents to start'}</span>
           {useAgent && <span className="topbar-badge"><Bot size={10} /> AGENT</span>}
           {useMemory && <span className="topbar-badge" style={{ borderColor: 'rgba(168,85,247,0.3)', color: 'var(--neon-purple)', background: 'rgba(168,85,247,0.06)' }}><Brain size={10} /> MEMORY</span>}
           {usePageIndex && <span className="topbar-badge" style={{ borderColor: 'var(--border-glow)', color: 'var(--neon-purple)' }}>TREE SEARCH</span>}
@@ -1343,7 +1373,7 @@ export default function App() {
           <button className={'pr-tab ' + (rightTab === 'settings' ? 'active' : '')} onClick={() => setRightTab('settings')}><Settings size={12} /> Settings</button>
         </div>
         <div className="pr-content">
-          {rightTab === 'files' && <FileTreePanel />}
+          {rightTab === 'files' && <FileTreePanel refreshKey={filesRefreshKey} />}
           {rightTab === 'memory' && <MemoryPanel token={token} onToast={addToast} />}
           {rightTab === 'analytics' && <AnalyticsPanel />}
           {rightTab === 'radar' && <IntegrityRadarPanel token={token} addToast={addToast} isReady={isReady} />}
@@ -1395,7 +1425,7 @@ export default function App() {
 
       {/* ── Modals ── */}
       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onAuth={handleAuth} />}
-      {showIngest && <IngestModal onClose={() => setShowIngest(false)} onToast={addToast} onRefresh={fetchStats} />}
+      {showIngest && <IngestModal onClose={() => setShowIngest(false)} onToast={addToast} onRefresh={() => { fetchStats(); setFilesRefreshKey(k => k + 1); }} />}
       {showPiUpload && <PiUploadModal onClose={() => setShowPiUpload(false)} onToast={addToast} onDocAdded={doc => setPiDocs(p => [...p.filter(d => d.doc_id !== doc.doc_id), doc])} />}
       <Toasts toasts={toasts} onDismiss={id => setToasts(p => p.filter(t => t.id !== id))} />
     </div>
