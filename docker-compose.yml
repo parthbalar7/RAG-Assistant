@@ -1,0 +1,41 @@
+# ═══════════════════════════════════════════════════
+#  RAG Assistant v2 — Docker Compose
+# ═══════════════════════════════════════════════════
+#
+#  Quick start:
+#    1. Copy .env.example to .env and add your API key
+#    2. docker compose up --build
+#    3. Open http://localhost:8000
+#
+
+services:
+  rag-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-assistant
+    ports:
+      - "${RAG_API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - RAG_CHROMA_PERSIST_DIR=/app/data/chroma_db
+      - RAG_DATABASE_PATH=/app/data/rag_assistant.db
+      - RAG_DOCS_DIRECTORY=/app/docs
+    volumes:
+      # Persist all data between restarts
+      - rag-data:/app/data
+      # Mount your documents folder (read-only)
+      - ./docs:/app/docs:ro
+    restart: unless-stopped
+    # Limit resources (sentence-transformers can be memory hungry)
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+
+volumes:
+  rag-data:
+    driver: local
