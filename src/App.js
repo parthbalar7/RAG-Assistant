@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_API_URL || '';
-const WS_URL = (process.env.REACT_APP_API_URL || window.location.origin).replace(/^http/, 'ws') + '/ws/query';
+const WS_URL = (process.env.REACT_APP_API_URL || window.location.origin).replace(/^http/, 'ws') + '/api/ws';
 
 /* Helper to extract error message from FastAPI response */
 function extractError(d, fallback) {
@@ -59,8 +59,9 @@ const api = {
   },
 };
 
-async function* streamQuery(query, history, opts, token) {
+async function* streamQuery(query, history, opts, token, wsRef) {
   const ws = new WebSocket(WS_URL);
+  if (wsRef) wsRef.current = ws;
   const evQueue = [];
   let notify = null;
   let wsError = null;
@@ -85,6 +86,7 @@ async function* streamQuery(query, history, opts, token) {
       }
     }
   } finally {
+    if (wsRef) wsRef.current = null;
     if (ws.readyState < 2) ws.close();
   }
 }
@@ -269,7 +271,7 @@ function AuthModal({ onClose, onAuth, required }) {
 }
 
 /* ── Ingest Modal (Drag & Drop folders + files) ── */
-function IngestModal({ onClose, onToast, onRefresh }) {
+function IngestModal({ onClose, onToast, onRefresh, token }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -390,7 +392,7 @@ function IngestModal({ onClose, onToast, onRefresh }) {
     if (!dirPath.trim()) return;
     setLoading(true); setResult(null);
     try {
-      const r = await api.post('/api/ingest', { directory: dirPath.trim() });
+      const r = await api.post('/api/ingest', { directory: dirPath.trim() }, token);
       setResult({ type: 'success', message: `Indexed ${r.chunks_indexed} chunks from ${r.documents_processed} files` });
       onToast('success', `Ingested ${r.documents_processed} files`); onRefresh();
     } catch (e) { setResult({ type: 'error', message: e.message }); }
@@ -411,7 +413,7 @@ function IngestModal({ onClose, onToast, onRefresh }) {
       batch.forEach(f => formData.append('files', f, f.name));
 
       try {
-        const r = await fetch(API + '/api/upload', { method: 'POST', body: formData });
+        const r = await fetch(API + '/api/upload', { method: 'POST', body: formData, headers: token ? { Authorization: 'Bearer ' + token } : {} });
         if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(extractError(d, 'Upload failed')); }
         const data = await r.json();
         totalChunks += data.chunks_indexed;
@@ -843,9 +845,171 @@ function IntegrityRadarPanel({ token, addToast, isReady }) {
 }
 
 
-function FileTreePanel({ refreshKey }) {
+function CompliancePanel({ token, onToast, isReady }) {
+  const FW_LIST = [
+    { key: 'HIPAA',   label: 'HIPAA',    desc: 'Health data privacy' },
+    { key: 'PCI_DSS', label: 'PCI DSS',  desc: 'Payment card security' },
+    { key: 'GDPR',    label: 'GDPR',     desc: 'EU data protection' },
+    { key: 'SOC2',    label: 'SOC 2',    desc: 'Service org controls' },
+    { key: 'OWASP',   label: 'OWASP',    desc: 'Web app security top 10' },
+  ];
+  const [framework, setFramework] = useState('OWASP');
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState(null);
+  const [history, setHistory] = useState([]);
+
+  const loadHistory = useCallback(() => {
+    api.get('/api/compliance/history', token).then(d => setHistory(d.scans || [])).catch(() => {});
+  }, [token]);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  const runScan = async () => {
+    setRunning(true); setResult(null);
+    try {
+      const res = await api.post('/api/compliance/scan', { framework, sample_size: 30 }, token);
+      setResult(res);
+      loadHistory();
+      onToast('success', `${res.framework} scan complete — risk score: ${res.risk_score}/100`);
+    } catch (e) { onToast('error', e.message); }
+    setRunning(false);
+  };
+
+  const riskColor = (s) => s == null ? 'var(--text-tertiary)' : s >= 75 ? '#f43f5e' : s >= 50 ? '#f97316' : s >= 25 ? '#eab308' : 'var(--neon-green)';
+  const riskLabel = (s) => s >= 75 ? 'Critical' : s >= 50 ? 'High' : s >= 25 ? 'Medium' : 'Low';
+  const sevColor  = (v) => v === 'critical' ? '#f43f5e' : v === 'high' ? '#f97316' : v === 'medium' ? '#eab308' : 'var(--text-tertiary)';
+  const SEV_ORDER = ['critical', 'high', 'medium', 'low'];
+  const sorted = (issues) => [...(issues || [])].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
+
+  return (
+    <div className="radar" style={{ padding: 8 }}>
+      {/* Header */}
+      <div className="radar-header">
+        <div>
+          <div className="pr-section-title" style={{ marginBottom: 2 }}>Compliance Scanner</div>
+          <div className="radar-sub">Analyze indexed code against regulatory frameworks.</div>
+        </div>
+        <button className={'radar-scan-btn ' + (running ? 'loading' : '')} onClick={runScan} disabled={running || !isReady}>
+          <AlertCircle size={13} /> {running ? 'Scanning…' : 'Run scan'}
+        </button>
+      </div>
+
+      {!isReady && <div className="radar-warn"><AlertCircle size={13} /> Index documents first.</div>}
+
+      {/* Framework picker */}
+      <div className="pr-section-title" style={{ marginTop: 10, marginBottom: 6 }}>Framework</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 12 }}>
+        {FW_LIST.map(fw => (
+          <button key={fw.key} onClick={() => setFramework(fw.key)} title={fw.desc} style={{
+            padding: '3px 9px', fontSize: 11, borderRadius: 5, cursor: 'pointer',
+            border: framework === fw.key ? '1px solid var(--neon-cyan)' : '1px solid var(--border)',
+            background: framework === fw.key ? 'var(--accent-soft)' : 'var(--bg-panel)',
+            color: framework === fw.key ? 'var(--neon-cyan)' : 'var(--text-secondary)',
+            fontFamily: 'var(--font-mono)',
+          }}>{fw.label}</button>
+        ))}
+      </div>
+
+      {/* Result */}
+      {result && <>
+        <div className="radar-top" style={{ marginBottom: 10 }}>
+          {/* Score card */}
+          <div className="radar-card" style={{ flex: '0 0 auto', minWidth: 90, textAlign: 'center' }}>
+            <div className="radar-card-title">Risk Score</div>
+            <div style={{ fontSize: 36, fontWeight: 700, color: riskColor(result.risk_score), fontFamily: 'var(--font-mono)', lineHeight: 1.1 }}>{result.risk_score}</div>
+            <div style={{ fontSize: 9, color: 'var(--text-tertiary)' }}>/ 100</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: riskColor(result.risk_score), marginTop: 4 }}>{riskLabel(result.risk_score)}</div>
+            <div style={{ fontSize: 9, color: 'var(--text-tertiary)', marginTop: 6, fontFamily: 'var(--font-mono)' }}>
+              {result.sampled_chunks}/{result.total_chunks} chunks
+            </div>
+          </div>
+          {/* Summary */}
+          <div className="radar-card" style={{ flex: 1 }}>
+            <div className="radar-card-title">Summary</div>
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.6 }}>{result.summary}</div>
+          </div>
+        </div>
+
+        {/* Issues */}
+        <div className="radar-card" style={{ marginBottom: 10 }}>
+          <div className="radar-card-title">Issues ({(result.issues || []).length})</div>
+          {(result.issues || []).length === 0
+            ? <div className="radar-muted">No issues found.</div>
+            : sorted(result.issues).map((iss, i) => (
+              <details key={i} className="issue" style={{ marginBottom: 4 }}>
+                <summary style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', listStyle: 'none', padding: '4px 0' }}>
+                  <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: sevColor(iss.severity), fontFamily: 'var(--font-mono)', border: `1px solid ${sevColor(iss.severity)}`, borderRadius: 3, padding: '1px 4px' }}>{iss.severity}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-primary)', flex: 1 }}>{iss.title}</span>
+                  {iss.file && iss.file !== 'multiple' && iss.file !== 'unknown' && (
+                    <span style={{ fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>{iss.file.split('/').pop()}</span>
+                  )}
+                </summary>
+                <div style={{ paddingLeft: 8, paddingTop: 4 }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>{iss.description}</div>
+                  {iss.recommendation && (
+                    <div style={{ fontSize: 11, color: 'var(--neon-cyan)', borderLeft: '2px solid var(--neon-cyan)', paddingLeft: 8 }}>
+                      Fix: {iss.recommendation}
+                    </div>
+                  )}
+                </div>
+              </details>
+            ))
+          }
+        </div>
+
+        {/* Compliant areas */}
+        {(result.compliant_areas || []).length > 0 && (
+          <div className="radar-card" style={{ marginBottom: 10 }}>
+            <div className="radar-card-title">Compliant Areas</div>
+            {result.compliant_areas.map((a, i) => (
+              <div key={i} className="rec"><CheckCircle2 size={11} style={{ color: 'var(--neon-green)' }} /> {a}</div>
+            ))}
+          </div>
+        )}
+      </>}
+
+      {/* History */}
+      {history.length > 0 && (
+        <div className="radar-card">
+          <div className="radar-card-title">History</div>
+          {history.map((h, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, padding: '3px 0', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>
+              <span style={{ color: 'var(--text-tertiary)' }}>{new Date(h.created_at * 1000).toLocaleDateString()}</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{h.framework}</span>
+              <span style={{ color: riskColor(h.risk_score), fontWeight: 600 }}>{h.risk_score}/100</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function FileTreePanel({ refreshKey, token, onToast }) {
   const [files, setFiles] = useState([]);
-  useEffect(() => { api.get('/api/files').then(d => setFiles(d.files || [])).catch(() => {}); }, [refreshKey]);
+  const [deleting, setDeleting] = useState(null);
+
+  const load = useCallback(() => {
+    api.get('/api/files', token).then(d => setFiles(d.files || [])).catch(() => {});
+  }, [token]);
+
+  useEffect(() => { load(); }, [refreshKey, load]);
+
+  const handleDelete = async (path) => {
+    if (!window.confirm(`Remove "${path.split('/').pop()}" from the index?`)) return;
+    setDeleting(path);
+    try {
+      await api.del('/api/files?path=' + encodeURIComponent(path), token);
+      onToast('success', 'File removed from index');
+      load();
+    } catch (e) {
+      onToast('error', e.message);
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   const tree = {};
   files.forEach(function(f) {
     const parts = f.path.split('/');
@@ -853,6 +1017,7 @@ function FileTreePanel({ refreshKey }) {
     if (!tree[dir]) tree[dir] = [];
     tree[dir].push(f);
   });
+
   if (files.length === 0) return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-tertiary)' }}>No files indexed yet.</div>;
   return (
     <div>
@@ -861,14 +1026,131 @@ function FileTreePanel({ refreshKey }) {
         <div key={dir}>
           <div className="pr-section-title" style={{ paddingLeft: 8 }}>{dir}</div>
           {items.map((f, i) => (
-            <div key={i} className="file-item">
+            <div key={i} className="file-item" style={{ gap: 4 }}>
               <FileCode size={12} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.path.split('/').pop()}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{f.path.split('/').pop()}</span>
               <span className="file-lang">{f.language}</span>
+              <button
+                onClick={() => handleDelete(f.path)}
+                disabled={deleting === f.path}
+                title="Remove from index"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: '0 2px', flexShrink: 0, opacity: deleting === f.path ? 0.4 : 1 }}
+              >
+                <Trash2 size={11} />
+              </button>
             </div>
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+
+
+function EvalPanel({ token, onToast, isReady }) {
+  const [cases, setCases] = useState([{ query: '', expected: '' }]);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState(null);
+  const [history, setHistory] = useState([]);
+
+  useEffect(() => {
+    api.get('/api/eval/history', token).then(d => setHistory(d.runs || [])).catch(() => {});
+  }, [token, result]);
+
+  const addCase = () => setCases(p => [...p, { query: '', expected: '' }]);
+  const removeCase = (i) => setCases(p => p.filter((_, j) => j !== i));
+  const updateCase = (i, field, val) => setCases(p => p.map((c, j) => j === i ? { ...c, [field]: val } : c));
+
+  const runEval = async () => {
+    const valid = cases.filter(c => c.query.trim());
+    if (!valid.length) { onToast('error', 'Add at least one query'); return; }
+    setRunning(true); setResult(null);
+    try {
+      const payload = {
+        cases: valid.map(c => ({
+          query: c.query.trim(),
+          expected_sources: c.expected.trim() ? c.expected.trim().split(',').map(s => s.trim()) : null,
+        })),
+      };
+      const r = await api.post('/api/eval/run', payload, token);
+      setResult(r);
+    } catch (e) { onToast('error', e.message); }
+    setRunning(false);
+  };
+
+  const fmt = (v) => v == null || v < 0 ? '—' : (v * 100).toFixed(1) + '%';
+  const scoreColor = (v) => v < 0 ? 'var(--text-tertiary)' : v >= 0.7 ? 'var(--neon-green)' : v >= 0.4 ? 'var(--warm)' : '#f43f9e';
+
+  return (
+    <div style={{ padding: 8 }}>
+      {!isReady && <div style={{ fontSize: 11, color: 'var(--warm)', marginBottom: 8 }}>Index documents first to run evaluations.</div>}
+      <div className="pr-section-title">Test Cases</div>
+      {cases.map((c, i) => (
+        <div key={i} style={{ marginBottom: 8, background: 'var(--bg-panel)', borderRadius: 6, padding: 8, border: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>Case {i + 1}</span>
+            {cases.length > 1 && <button onClick={() => removeCase(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}><X size={11} /></button>}
+          </div>
+          <textarea
+            value={c.query}
+            onChange={e => updateCase(i, 'query', e.target.value)}
+            placeholder="Test query..."
+            rows={2}
+            style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 6px', fontSize: 11, color: 'var(--text-primary)', resize: 'vertical', fontFamily: 'var(--font-mono)', boxSizing: 'border-box' }}
+          />
+          <input
+            value={c.expected}
+            onChange={e => updateCase(i, 'expected', e.target.value)}
+            placeholder="Expected sources (optional, comma-separated)"
+            style={{ width: '100%', marginTop: 4, background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 6px', fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', boxSizing: 'border-box' }}
+          />
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+        <button onClick={addCase} className="sl-footer-btn" style={{ flex: 1 }}><PlusCircle size={11} /> Add Case</button>
+        <button onClick={runEval} disabled={running || !isReady} className="sl-footer-btn" style={{ flex: 1, background: running ? undefined : 'var(--accent-soft)', borderColor: 'var(--border-neon)' }}>
+          {running ? 'Running…' : <><Sparkles size={11} /> Run Eval</>}
+        </button>
+      </div>
+
+      {result && (
+        <div style={{ marginBottom: 12 }}>
+          <div className="pr-section-title">Results</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
+            {[['Hit Rate', result.retrieval_hit_rate], ['Avg MRR', result.avg_mrr], ['Faithfulness', result.avg_faithfulness], ['Relevance', result.avg_relevance]].map(([label, val]) => (
+              <div key={label} style={{ background: 'var(--bg-panel)', borderRadius: 6, padding: '6px 8px', border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: 9, color: 'var(--text-tertiary)', marginBottom: 2 }}>{label}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: scoreColor(val), fontFamily: 'var(--font-mono)' }}>{fmt(val)}</div>
+              </div>
+            ))}
+          </div>
+          {result.cases && result.cases.map((c, i) => (
+            <div key={i} style={{ marginBottom: 6, fontSize: 10, background: 'var(--bg-panel)', borderRadius: 4, padding: '5px 8px', border: '1px solid var(--border)' }}>
+              <div style={{ color: 'var(--text-secondary)', marginBottom: 2, fontWeight: 600 }}>{c.query}</div>
+              <div style={{ color: 'var(--text-tertiary)' }}>
+                Faith: <span style={{ color: scoreColor(c.faithfulness) }}>{fmt(c.faithfulness)}</span>
+                {' · '}Rel: <span style={{ color: scoreColor(c.relevance) }}>{fmt(c.relevance)}</span>
+                {' · '}Hit: <span style={{ color: c.retrieval_hit ? 'var(--neon-green)' : '#f43f9e' }}>{c.retrieval_hit ? '✓' : '✗'}</span>
+              </div>
+              {c.details && <div style={{ color: 'var(--text-tertiary)', marginTop: 2, fontStyle: 'italic' }}>{c.details}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <>
+          <div className="pr-section-title">History</div>
+          {history.slice(0, 5).map((r, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10, padding: '4px 0', borderBottom: '1px solid var(--border)' }}>
+              <span style={{ color: 'var(--text-tertiary)' }}>{new Date(r.created_at * 1000).toLocaleString()}</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{r.total_cases} cases</span>
+              <span style={{ color: scoreColor(r.avg_faithfulness) }}>F:{fmt(r.avg_faithfulness)}</span>
+              <span style={{ color: scoreColor(r.avg_relevance) }}>R:{fmt(r.avg_relevance)}</span>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
@@ -1134,6 +1416,7 @@ export default function App() {
   const [showMdPreview, setShowMdPreview] = useState(false);
   const [pdfSource, setPdfSource] = useState(null);
 
+  const wsRef = useRef(null);
   const chatEndRef = useRef(null);
   const textareaRef = useRef(null);
 
@@ -1144,7 +1427,7 @@ export default function App() {
   }, []);
   const { recording, toggle: toggleVoice } = useVoiceInput(voiceCallback);
 
-  const fetchStats = useCallback(() => { api.get('/api/stats').then(setStats).catch(() => setStats(null)); }, []);
+  const fetchStats = useCallback(() => { api.get('/api/stats', token).then(setStats).catch(() => setStats(null)); }, [token]);
   useEffect(() => { fetchStats(); const i = setInterval(fetchStats, 20000); return () => clearInterval(i); }, [fetchStats]);
 
   const fetchSessions = useCallback(() => { api.get('/api/sessions', token).then(d => setSessions(d.sessions || [])).catch(() => {}); }, [token]);
@@ -1197,7 +1480,7 @@ export default function App() {
       setMessages(p => [...p, msg]);
       const isFirstMsg = messages.length === 0;
       try {
-        for await (const ev of streamQuery(q, getHistory(), opts, token)) {
+        for await (const ev of streamQuery(q, getHistory(), { ...opts, session_id: sid }, token, wsRef)) {
           if (ev.type === 'sources') msg = { ...msg, sources: ev.sources };
           else if (ev.type === 'route') msg = { ...msg, route: ev.route };
           else if (ev.type === 'memories') msg = { ...msg, memoriesUsed: ev.count };
@@ -1217,7 +1500,7 @@ export default function App() {
     } else {
       setLoading(true);
       try {
-        const r = await api.post('/api/query', { query: q, conversation_history: getHistory(), ...opts }, token);
+        const r = await api.post('/api/query', { query: q, conversation_history: getHistory(), session_id: sid, ...opts }, token);
         setMessages(p => [...p, { role: 'assistant', content: r.answer, sources: r.sources, meta: { model: r.model, latency: r.latency_ms, usage: r.usage }, route: r.route, memoriesUsed: r.memories_used || 0 }]);
         if (sid && messages.length === 0) {
           const title = q.slice(0, 50) + (q.length > 50 ? '...' : '');
@@ -1250,7 +1533,7 @@ export default function App() {
       <aside className={'sidebar-left ' + (leftOpen ? '' : 'collapsed')} style={leftOpen ? { width: leftWidth, minWidth: leftWidth } : {}}>
         <div className="sl-header">
           <div className="sl-logo"><Sparkles size={16} /></div>
-          <div className="sl-title">RAG Assistant</div>
+          <div className="sl-title">Parth's RAG Assistant</div>
         </div>
         <button className="sl-new-btn" onClick={newSession}><Plus size={14} /> New Chat</button>
         <div className="sl-sessions">
@@ -1353,7 +1636,10 @@ export default function App() {
                 <button className={'preview-btn' + (showMdPreview ? ' active' : '')} onClick={() => setShowMdPreview(!showMdPreview)} title="Markdown preview">
                   {showMdPreview ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
-                <button className="send-btn" onClick={handleSend} disabled={!input.trim() || loading || streaming || !isReady}><Send size={14} /></button>
+                {streaming
+                  ? <button className="send-btn stop-btn" onClick={() => { if (wsRef.current) { wsRef.current.close(); wsRef.current = null; } }} title="Stop generation"><X size={14} /></button>
+                  : <button className="send-btn" onClick={handleSend} disabled={!input.trim() || loading || !isReady}><Send size={14} /></button>
+                }
               </div>
             </div>
             <div className="input-hint">Enter to send · Shift+Enter newline · {useAgent ? 'Agent' : useStreaming ? 'Stream' : 'Standard'} mode{recording ? ' · 🎙 Listening...' : ''}</div>
@@ -1370,13 +1656,17 @@ export default function App() {
           <button className={'pr-tab ' + (rightTab === 'memory' ? 'active' : '')} onClick={() => setRightTab('memory')}><Brain size={12} /> Memory</button>
           <button className={'pr-tab ' + (rightTab === 'analytics' ? 'active' : '')} onClick={() => setRightTab('analytics')}><BarChart3 size={12} /> Analytics</button>
           <button className={'pr-tab ' + (rightTab === 'radar' ? 'active' : '')} onClick={() => setRightTab('radar')}><Sparkles size={12} /> Radar</button>
+          <button className={'pr-tab ' + (rightTab === 'eval' ? 'active' : '')} onClick={() => setRightTab('eval')}><Search size={12} /> Eval</button>
+          <button className={'pr-tab ' + (rightTab === 'compliance' ? 'active' : '')} onClick={() => setRightTab('compliance')}><AlertCircle size={12} /> Compliance</button>
           <button className={'pr-tab ' + (rightTab === 'settings' ? 'active' : '')} onClick={() => setRightTab('settings')}><Settings size={12} /> Settings</button>
         </div>
         <div className="pr-content">
-          {rightTab === 'files' && <FileTreePanel refreshKey={filesRefreshKey} />}
+          {rightTab === 'files' && <FileTreePanel refreshKey={filesRefreshKey} token={token} onToast={addToast} />}
           {rightTab === 'memory' && <MemoryPanel token={token} onToast={addToast} />}
           {rightTab === 'analytics' && <AnalyticsPanel />}
+          {rightTab === 'eval' && <EvalPanel token={token} onToast={addToast} isReady={isReady} />}
           {rightTab === 'radar' && <IntegrityRadarPanel token={token} addToast={addToast} isReady={isReady} />}
+          {rightTab === 'compliance' && <CompliancePanel token={token} onToast={addToast} isReady={isReady} />}
           {rightTab === 'settings' && <>
             <div className="pr-section-title">Retrieval</div>
             <div className="setting-row"><span>Hybrid search</span><div className={'toggle ' + (useHybrid ? 'on' : '')} onClick={() => setUseHybrid(!useHybrid)} /></div>
@@ -1425,7 +1715,7 @@ export default function App() {
 
       {/* ── Modals ── */}
       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onAuth={handleAuth} />}
-      {showIngest && <IngestModal onClose={() => setShowIngest(false)} onToast={addToast} onRefresh={() => { fetchStats(); setFilesRefreshKey(k => k + 1); }} />}
+      {showIngest && <IngestModal onClose={() => setShowIngest(false)} onToast={addToast} onRefresh={() => { fetchStats(); setFilesRefreshKey(k => k + 1); }} token={token} />}
       {showPiUpload && <PiUploadModal onClose={() => setShowPiUpload(false)} onToast={addToast} onDocAdded={doc => setPiDocs(p => [...p.filter(d => d.doc_id !== doc.doc_id), doc])} />}
       <Toasts toasts={toasts} onDismiss={id => setToasts(p => p.filter(t => t.id !== id))} />
     </div>

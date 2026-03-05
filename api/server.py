@@ -24,6 +24,7 @@ from core.router import route_query_fast
 from core.agent import run_agent
 from core import pageindex_retriever as pindex
 from core.integrity import run_integrity_scan
+from core.compliance import run_compliance_scan, FRAMEWORKS as COMPLIANCE_FRAMEWORKS
 from core.memory import (
     get_memory_store, retrieve_memories, process_turn_memories,
     process_session_summary, MemoryFragment, optimize_context_chunks,
@@ -34,15 +35,21 @@ from api.auth import hash_password, verify_password, create_token, get_current_u
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-store = None
+_user_stores: dict = {}
+_user_stores_lock = threading.Lock()
+
+
+def get_user_store(uid: str) -> VectorStore:
+    with _user_stores_lock:
+        if uid not in _user_stores:
+            _user_stores[uid] = VectorStore(collection_name=f"docs_{uid}")
+        return _user_stores[uid]
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global store
     db.init_db()
-    store = VectorStore()
-    logger.info(f"Ready: {store.count} chunks indexed")
+    logger.info("RAG server ready")
     yield
 
 
@@ -79,6 +86,11 @@ class IngestReq(BaseModel):
 
 class IntegrityScanReq(BaseModel):
     persist: bool = True
+
+
+class ComplianceScanReq(BaseModel):
+    framework: str = Field(..., description="HIPAA | PCI_DSS | GDPR | SOC2 | OWASP")
+    sample_size: int = Field(default=30, ge=5, le=200)
 
 
 # ── Auth Endpoints ──
@@ -140,12 +152,14 @@ async def del_session(sid: str):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "healthy", "collection_size": store.count if store else 0}
+    return {"status": "healthy"}
 
 
 @app.get("/api/stats")
-async def stats():
-    return {"collection_name": settings.collection_name, "document_count": store.count if store else 0,
+async def stats(user=Depends(require_auth)):
+    uid = user["id"]
+    s = get_user_store(uid)
+    return {"collection_name": f"docs_{uid}", "document_count": s.count,
             "embedding_model": settings.embedding_model, "llm_model": settings.llm_model,
             "bm25_weight": settings.bm25_weight, "vector_weight": settings.vector_weight,
             "pageindex_enabled": pindex.is_available(),
@@ -153,9 +167,9 @@ async def stats():
 
 
 @app.post("/api/ingest")
-async def ingest(req: IngestReq):
-    if not store:
-        raise HTTPException(503, "Not ready")
+async def ingest(req: IngestReq, user=Depends(require_auth)):
+    uid = user["id"]
+    s = get_user_store(uid)
     chunks = ingest_directory(req.directory)
     if not chunks:
         from pathlib import Path
@@ -168,15 +182,15 @@ async def ingest(req: IngestReq):
         from core.ingestion import SUPPORTED_EXTENSIONS
         supported_found = exts & SUPPORTED_EXTENSIONS
         raise HTTPException(400, f"No supported documents found in {req.directory}. Found {file_count} files with extensions: {', '.join(sorted(exts)[:20]) or 'none'}. Supported matches: {', '.join(sorted(supported_found)) or 'none'}")
-    added = store.add_chunks(chunks)
+    added = s.add_chunks(chunks)
     return {"chunks_indexed": added, "documents_processed": len(set(c.document_path for c in chunks)),
-            "collection_total": store.count, "files": sorted(set(c.document_path for c in chunks))}
+            "collection_total": s.count, "files": sorted(set(c.document_path for c in chunks))}
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)):
-    if not store:
-        raise HTTPException(503, "Not ready")
+async def upload(files: list[UploadFile] = File(...), user=Depends(require_auth)):
+    uid = user["id"]
+    s = get_user_store(uid)
     total, processed = 0, []
     with tempfile.TemporaryDirectory() as tmp:
         for f in files:
@@ -187,22 +201,23 @@ async def upload(files: list[UploadFile] = File(...)):
                 fh.write(await f.read())
         chunks = ingest_directory(tmp)
         if chunks:
-            total = store.add_chunks(chunks)
+            total = s.add_chunks(chunks)
             processed = sorted(set(c.document_path for c in chunks))
     return {"chunks_indexed": total, "files_processed": processed,
-            "documents_processed": len(processed), "collection_total": store.count}
+            "documents_processed": len(processed), "collection_total": s.count}
 
 
 @app.post("/api/query")
 async def query(req: QueryReq, user=Depends(require_auth)):
-    if not req.use_pageindex and (not store or store.count == 0):
+    uid = user["id"]
+    s = get_user_store(uid)
+    if not req.use_pageindex and s.count == 0:
         raise HTTPException(400, "No documents indexed")
     start = time.perf_counter()
-    uid = user["id"] if user else None
     route = route_query_fast(req.query) if req.use_routing else None
 
     if req.use_agent:
-        result = run_agent(query=req.query, store=store, retrieve_fn=retrieve,
+        result = run_agent(query=req.query, store=s, retrieve_fn=retrieve,
                            conversation_history=req.conversation_history)
         ms = (time.perf_counter() - start) * 1000
         if req.session_id:
@@ -216,7 +231,7 @@ async def query(req: QueryReq, user=Depends(require_auth)):
                 "route": {"category": "agent", "strategy": "agent", "steps": len(result.steps)}}
 
     top_k = req.top_k or (route.suggested_top_k if route else settings.top_k)
-    hits = retrieve(store=store, query=req.query, top_k=top_k,
+    hits = retrieve(store=s, query=req.query, top_k=top_k,
                     use_reranking=req.use_reranking, use_hybrid=req.use_hybrid,
                     language_filter=req.language_filter or (route.language_hint if route else None))
     hist = [Message(role=m["role"], content=m["content"]) for m in req.conversation_history] if req.conversation_history else None
@@ -268,15 +283,16 @@ async def query(req: QueryReq, user=Depends(require_auth)):
 
 @app.post("/api/query/stream")
 async def query_stream(req: QueryReq, user=Depends(require_auth)):
-    if not req.use_pageindex and (not store or store.count == 0):
-        raise HTTPException(400, "No documents indexed")
     uid = user["id"]
+    s = get_user_store(uid)
+    if not req.use_pageindex and s.count == 0:
+        raise HTTPException(400, "No documents indexed")
     route = route_query_fast(req.query) if req.use_routing else None
     top_k = req.top_k or (route.suggested_top_k if route else settings.top_k)
     hits = []
     sources = []
     if not req.use_pageindex:
-        hits = retrieve(store=store, query=req.query, top_k=top_k,
+        hits = retrieve(store=s, query=req.query, top_k=top_k,
                         use_reranking=req.use_reranking, use_hybrid=req.use_hybrid)
         sources = [{"file": h["metadata"].get("document_path", ""),
                     "lines": f"{h['metadata'].get('start_line','?')}-{h['metadata'].get('end_line','?')}",
@@ -328,7 +344,7 @@ async def query_stream(req: QueryReq, user=Depends(require_auth)):
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.websocket("/ws/query")
+@app.websocket("/api/ws")
 async def ws_query_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
@@ -365,7 +381,8 @@ async def ws_query_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "error", "message": "Empty query"})
                 continue
 
-            if not use_pi and (not store or store.count == 0):
+            s = get_user_store(uid)
+            if not use_pi and s.count == 0:
                 await websocket.send_json({"type": "error", "message": "No documents indexed"})
                 continue
 
@@ -395,7 +412,7 @@ async def ws_query_endpoint(websocket: WebSocket):
                     top_k = top_k_req or (route.suggested_top_k if route else settings.top_k)
 
                     hits = await asyncio.to_thread(
-                        retrieve, store=store, query=query_text, top_k=top_k,
+                        retrieve, store=s, query=query_text, top_k=top_k,
                         use_reranking=use_reranking, use_hybrid=use_hybrid
                     )
                     sources = [{"file": h["metadata"].get("document_path", ""),
@@ -421,13 +438,16 @@ async def ws_query_endpoint(websocket: WebSocket):
                     if memory_ctx and memory_ctx.count > 0:
                         await websocket.send_json({"type": "memories", "count": memory_ctx.count})
 
-                    # Stream tokens via thread + queue bridge
+                    # Stream tokens via thread + queue bridge with cancel support
                     token_queue: stdlib_queue.Queue = stdlib_queue.Queue()
+                    stop_event = threading.Event()
 
                     def producer():
                         try:
                             for chunk in generate_stream(query=query_text, hits=optimized_hits,
                                                          conversation_history=hist, memory_context=memory_ctx):
+                                if stop_event.is_set():
+                                    break
                                 token_queue.put(("token", chunk))
                         except Exception as e:
                             token_queue.put(("error", str(e)))
@@ -446,7 +466,11 @@ async def ws_query_endpoint(websocket: WebSocket):
                             break
                         else:
                             collected_answer.append(item_val)
-                            await websocket.send_json({"type": "token", "token": item_val})
+                            try:
+                                await websocket.send_json({"type": "token", "token": item_val})
+                            except Exception:
+                                stop_event.set()
+                                break
 
                     full_answer = "".join(collected_answer)
 
@@ -477,8 +501,17 @@ async def ws_query_endpoint(websocket: WebSocket):
 
 
 @app.get("/api/files")
-async def file_tree():
-    return {"files": store.get_all_files() if store else []}
+async def file_tree(user=Depends(require_auth)):
+    return {"files": get_user_store(user["id"]).get_all_files()}
+
+
+@app.delete("/api/files")
+async def delete_file(path: str, user=Depends(require_auth)):
+    s = get_user_store(user["id"])
+    deleted = s.delete_file(path)
+    if deleted == 0:
+        raise HTTPException(404, "File not found in index")
+    return {"deleted_chunks": deleted, "path": path}
 
 
 @app.get("/api/analytics")
@@ -486,15 +519,75 @@ async def analytics(days: int = 7):
     return db.get_analytics(days)
 
 
+# ── Evaluation ──
+
+class EvalCaseReq(BaseModel):
+    query: str
+    expected_sources: Optional[List[str]] = None
+
+
+class EvalRunReq(BaseModel):
+    cases: List[EvalCaseReq] = Field(default_factory=list)
+
+
+@app.post("/api/eval/run")
+async def eval_run(req: EvalRunReq, user=Depends(require_auth)):
+    from core.evaluation import evaluate_response
+    uid = user["id"]
+    s = get_user_store(uid)
+    if s.count == 0:
+        raise HTTPException(400, "No documents indexed")
+    if not req.cases:
+        raise HTTPException(400, "Provide at least one test case")
+
+    def _run():
+        case_results = []
+        for tc in req.cases:
+            hits = retrieve(store=s, query=tc.query, top_k=settings.top_k,
+                            use_reranking=True, use_hybrid=True)
+            from core.generator import generate
+            resp = generate(query=tc.query, hits=hits)
+            ev = evaluate_response(tc.query, resp.answer, hits, tc.expected_sources)
+            case_results.append({
+                "query": ev.query,
+                "retrieval_hit": ev.retrieval_hit,
+                "mrr": ev.mrr,
+                "faithfulness": ev.faithfulness_score,
+                "relevance": ev.relevance_score,
+                "details": ev.details,
+            })
+        n = len(case_results)
+        vf = [r["faithfulness"] for r in case_results if r["faithfulness"] >= 0]
+        vr = [r["relevance"] for r in case_results if r["relevance"] >= 0]
+        return {
+            "total_cases": n,
+            "retrieval_hit_rate": sum(r["retrieval_hit"] for r in case_results) / n,
+            "avg_mrr": sum(r["mrr"] for r in case_results) / n,
+            "avg_faithfulness": sum(vf) / len(vf) if vf else -1,
+            "avg_relevance": sum(vr) / len(vr) if vr else -1,
+            "cases": case_results,
+        }
+
+    metrics = await asyncio.to_thread(_run)
+    db.save_eval_run(uid, metrics)
+    return metrics
+
+
+@app.get("/api/eval/history")
+async def eval_history(user=Depends(require_auth)):
+    return {"runs": db.get_eval_history(user["id"])}
+
+
 # ── Knowledge Integrity & Risk Radar ──
 
 @app.post("/api/integrity/scan")
-async def integrity_scan(req: IntegrityScanReq, user=Depends(get_current_user)):
-    if not store or store.count == 0:
+async def integrity_scan(req: IntegrityScanReq, user=Depends(require_auth)):
+    uid = user["id"]
+    s = get_user_store(uid)
+    if s.count == 0:
         raise HTTPException(400, "No documents indexed")
-    uid = user["id"] if user else None
     prev = db.get_latest_integrity_fingerprints()
-    result = run_integrity_scan(store, previous_fingerprints=prev)
+    result = run_integrity_scan(s, previous_fingerprints=prev)
     if req.persist:
         scan_id = db.save_integrity_scan(uid, result)
         result["scan_id"] = scan_id
@@ -515,10 +608,39 @@ async def integrity_scan_detail(scan_id: str):
 
 
 @app.delete("/api/collection")
-async def clear():
-    if store:
-        store.clear()
+async def clear(user=Depends(require_auth)):
+    get_user_store(user["id"]).clear()
     return {"status": "cleared"}
+
+
+# ── Compliance ──
+
+@app.get("/api/compliance/frameworks")
+async def compliance_frameworks():
+    return {"frameworks": {k: {"name": v["name"], "full_name": v["full_name"]} for k, v in COMPLIANCE_FRAMEWORKS.items()}}
+
+
+@app.post("/api/compliance/scan")
+async def compliance_scan(req: ComplianceScanReq, user=Depends(require_auth)):
+    uid = user["id"]
+    s = get_user_store(uid)
+    if s.count == 0:
+        raise HTTPException(400, "No documents indexed")
+    if req.framework not in COMPLIANCE_FRAMEWORKS:
+        raise HTTPException(400, f"Unknown framework. Choose from: {list(COMPLIANCE_FRAMEWORKS.keys())}")
+    try:
+        result = await asyncio.to_thread(run_compliance_scan, s, req.framework, req.sample_size)
+    except Exception as e:
+        logger.error("Compliance scan error: %s", e)
+        raise HTTPException(500, str(e))
+    scan_id = db.save_compliance_scan(uid, result)
+    result["scan_id"] = scan_id
+    return result
+
+
+@app.get("/api/compliance/history")
+async def compliance_history(user=Depends(require_auth)):
+    return {"scans": db.get_compliance_history(user["id"])}
 
 
 # ── Memory Endpoints ──

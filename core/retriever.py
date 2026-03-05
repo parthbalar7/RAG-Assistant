@@ -236,10 +236,26 @@ class VectorStore:
 
         return sorted(files.values(), key=lambda x: x["path"])
 
+    def delete_file(self, file_path: str) -> int:
+        """Delete all chunks belonging to a specific file."""
+        if self.count == 0:
+            return 0
+        all_docs = self.collection.get(include=["metadatas"])
+        ids_to_delete = [
+            doc_id for doc_id, meta in zip(all_docs["ids"], all_docs["metadatas"])
+            if meta.get("document_path") == file_path
+        ]
+        if ids_to_delete:
+            self.collection.delete(ids=ids_to_delete)
+            self._rebuild_bm25()
+            logger.info("Deleted {} chunks for {}".format(len(ids_to_delete), file_path))
+        return len(ids_to_delete)
+
     def clear(self):
-        self.client.delete_collection(self.collection.name)
+        name = self.collection.name
+        self.client.delete_collection(name)
         self.collection = self.client.get_or_create_collection(
-            name=settings.collection_name,
+            name=name,
             metadata={"hnsw:space": "cosine"},
         )
         self.bm25_index = BM25Index()

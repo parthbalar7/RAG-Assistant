@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # --- Chunking ---
     chunk_size: int = Field(default=512)
     chunk_overlap: int = Field(default=64)
-    min_chunk_size: int = Field(default=50)
+    min_chunk_size: int = Field(default=10)
 
     # --- Retrieval ---
     top_k: int = Field(default=10)

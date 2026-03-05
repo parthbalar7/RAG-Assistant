@@ -91,6 +91,33 @@ def init_db():
             created_at REAL NOT NULL,
             FOREIGN KEY (scan_id) REFERENCES integrity_scans(id)
         );
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            total_cases INTEGER NOT NULL,
+            hit_rate REAL,
+            avg_mrr REAL,
+            avg_faithfulness REAL,
+            avg_relevance REAL,
+            details TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_user ON eval_runs(user_id, created_at);
+        CREATE TABLE IF NOT EXISTS compliance_scans (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            framework TEXT NOT NULL,
+            framework_full_name TEXT,
+            summary TEXT,
+            risk_score INTEGER NOT NULL,
+            issues TEXT,
+            compliant_areas TEXT,
+            sampled_chunks INTEGER,
+            total_chunks INTEGER,
+            duration_ms REAL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_compliance_scans_user ON compliance_scans(user_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_integrity_scans_created ON integrity_scans(created_at);
         CREATE INDEX IF NOT EXISTS idx_integrity_issues_scan ON integrity_issues(scan_id);
 
@@ -299,6 +326,64 @@ def get_integrity_history(days: int = 30, limit: int = 30):
         out.append(d)
     conn.close()
     return {"scans": out}
+
+
+def save_eval_run(user_id, metrics: dict):
+    conn = _get_conn()
+    run_id = str(uuid.uuid4())[:12]
+    now = time.time()
+    conn.execute(
+        "INSERT INTO eval_runs (id, user_id, total_cases, hit_rate, avg_mrr, avg_faithfulness, avg_relevance, details, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (run_id, user_id, metrics.get("total_cases", 0), metrics.get("retrieval_hit_rate"),
+         metrics.get("avg_mrr"), metrics.get("avg_faithfulness"), metrics.get("avg_relevance"),
+         json.dumps(metrics.get("cases", [])), now),
+    )
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def get_eval_history(user_id=None, limit=20):
+    conn = _get_conn()
+    if user_id:
+        rows = conn.execute(
+            "SELECT id, total_cases, hit_rate, avg_mrr, avg_faithfulness, avg_relevance, created_at FROM eval_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, total_cases, hit_rate, avg_mrr, avg_faithfulness, avg_relevance, created_at FROM eval_runs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_compliance_scan(user_id: str, result: dict) -> str:
+    conn = _get_conn()
+    scan_id = str(uuid.uuid4())[:12]
+    now = time.time()
+    conn.execute(
+        "INSERT INTO compliance_scans (id, user_id, framework, framework_full_name, summary, risk_score, issues, compliant_areas, sampled_chunks, total_chunks, duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (scan_id, user_id, result.get("framework", ""), result.get("framework_full_name", ""),
+         result.get("summary", ""), int(result.get("risk_score", 0)),
+         json.dumps(result.get("issues", [])), json.dumps(result.get("compliant_areas", [])),
+         int(result.get("sampled_chunks", 0)), int(result.get("total_chunks", 0)),
+         float(result.get("duration_ms", 0)), now),
+    )
+    conn.commit()
+    conn.close()
+    return scan_id
+
+
+def get_compliance_history(user_id: str, limit: int = 20) -> list:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, framework, framework_full_name, risk_score, sampled_chunks, total_chunks, duration_ms, created_at FROM compliance_scans WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_integrity_scan(scan_id: str):

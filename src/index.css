@@ -212,6 +212,7 @@ body { font-family: var(--font-body); background: var(--bg-base); color: var(--t
 .send-btn:hover:not(:disabled) { transform: scale(1.06); box-shadow: var(--shadow-neon); }
 .send-btn:active:not(:disabled) { transform: scale(0.95); }
 .send-btn:disabled { opacity: 0.3; cursor: default; animation: none; }
+.stop-btn { background: linear-gradient(135deg, #f43f9e, #ef4444) !important; animation: none !important; }
 .input-hint { font-size: 10.5px; color: var(--text-tertiary); text-align: center; margin-top: 8px; font-family: var(--font-mono); letter-spacing: 0.3px; }
 
 /* ── Markdown Preview Pane ── */
