@@ -264,9 +264,7 @@ class MemoryStore:
 
 # -- Memory Extraction (LLM-based, Token-Optimized) --
 
-def _get_client():
-    from core.generator import get_client
-    return get_client()
+from core import llm_client as _llm_client
 
 
 # Compact system prompt (saves ~100 tokens vs verbose version)
@@ -309,28 +307,28 @@ def _truncate_for_extraction(text, max_chars=800):
 
 def extract_memories_from_turn(query, answer, session_id=""):
     """Extract memory fragments from a single Q&A turn using cheapest model."""
-    if not settings.anthropic_api_key or not settings.memory_enabled:
+    if not settings.memory_enabled:
+        return []
+    # Anthropic-only guard: skip if API key missing and we're using Anthropic
+    if _llm_client.get_backend() == "anthropic" and not settings.anthropic_api_key:
         return []
     if not _should_extract(query, answer):
         return []
 
     try:
-        client = _get_client()
         # Truncate inputs to minimize tokens
         q_trunc = _truncate_for_extraction(query, 400)
         a_trunc = _truncate_for_extraction(answer, 800)
 
-        response = client.messages.create(
-            model=settings.memory_extraction_model,  # Haiku by default
-            max_tokens=512,  # Down from 1024 — memories are short
-            temperature=0.0,
+        text = _llm_client.chat(
+            messages=[{"role": "user", "content": "Q: {}\nA: {}".format(q_trunc, a_trunc)}],
             system=EXTRACT_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": "Q: {}\nA: {}".format(q_trunc, a_trunc),
-            }],
+            model=_llm_client.get_memory_model(),
+            max_tokens=512,
+            temperature=0.0,
+            stream=False,
         )
-        text = response.content[0].text.strip()
+        text = text.strip()
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -340,7 +338,7 @@ def extract_memories_from_turn(query, answer, session_id=""):
             return []
 
         fragments = []
-        for fd in fragments_data[:3]:  # Max 3 per turn (down from 5)
+        for fd in fragments_data[:3]:  # Max 3 per turn
             content = fd.get("c") or fd.get("content", "")
             if not content or len(content) < 10:
                 continue
@@ -354,8 +352,7 @@ def extract_memories_from_turn(query, answer, session_id=""):
                 source_session_id=session_id,
                 source_query=query[:100],
             ))
-        logger.info("Extracted {} memories ({} input + {} output tokens)".format(
-            len(fragments), response.usage.input_tokens, response.usage.output_tokens))
+        logger.info("Extracted {} memories".format(len(fragments)))
         return fragments
 
     except json.JSONDecodeError as e:
@@ -368,29 +365,30 @@ def extract_memories_from_turn(query, answer, session_id=""):
 
 def summarize_conversation(messages, session_id=""):
     """Summarize an entire conversation into a single compact memory."""
-    if not settings.anthropic_api_key or not settings.memory_enabled:
+    if not settings.memory_enabled:
+        return None
+    if _llm_client.get_backend() == "anthropic" and not settings.anthropic_api_key:
         return None
     if len(messages) < 4:
         return None
 
     try:
-        # Build compact conversation text (truncate each message)
         parts = []
-        for m in messages[:20]:  # Cap at 20 (down from 30)
-            role = m.get("role", "user")[0].upper()  # U or A
-            content = m.get("content", "")[:200]  # Down from 500
+        for m in messages[:20]:
+            role = m.get("role", "user")[0].upper()
+            content = m.get("content", "")[:200]
             parts.append("{}: {}".format(role, content))
         conv_text = "\n".join(parts)
 
-        client = _get_client()
-        response = client.messages.create(
-            model=settings.memory_extraction_model,
-            max_tokens=256,  # Down from 512
-            temperature=0.0,
-            system=SUMMARIZE_SYSTEM,
+        text = _llm_client.chat(
             messages=[{"role": "user", "content": conv_text}],
+            system=SUMMARIZE_SYSTEM,
+            model=_llm_client.get_memory_model(),
+            max_tokens=256,
+            temperature=0.0,
+            stream=False,
         )
-        text = response.content[0].text.strip()
+        text = text.strip()
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):

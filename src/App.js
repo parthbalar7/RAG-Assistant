@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import ReactDOM from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -845,6 +846,113 @@ function IntegrityRadarPanel({ token, addToast, isReady }) {
 }
 
 
+const ANTHROPIC_MODELS = [
+  { value: 'claude-sonnet-4-20250514',   label: 'Claude Sonnet 4.5' },
+  { value: 'claude-haiku-4-5-20251001',  label: 'Claude Haiku 4.5' },
+  { value: 'claude-opus-4-20250514',     label: 'Claude Opus 4' },
+];
+
+function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState(null);
+  const triggerRef = useRef(null);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    const handler = e => {
+      if (triggerRef.current && !triggerRef.current.contains(e.target) &&
+          dropdownRef.current && !dropdownRef.current.contains(e.target))
+        setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const handleOpen = () => {
+    if (triggerRef.current) setRect(triggerRef.current.getBoundingClientRect());
+    if (!open) onFetchModels();
+    setOpen(o => !o);
+  };
+
+  const backend = llmStatus?.backend || 'anthropic';
+  const activeModel = llmStatus?.model || '';
+  const shortName = activeModel.length > 20 ? activeModel.slice(0, 18) + '…' : (activeModel || '…');
+
+  const modelList = backend === 'anthropic'
+    ? ANTHROPIC_MODELS
+    : [{ value: '', label: `default (${activeModel})` }, ...ollamaModels.map(m => ({ value: m, label: m }))];
+
+  const dropdown = open && rect && ReactDOM.createPortal(
+    <div ref={dropdownRef} style={{
+      position: 'fixed',
+      bottom: window.innerHeight - rect.top + 6,
+      left: Math.max(8, rect.left),
+      minWidth: 230,
+      zIndex: 9999,
+      background: 'var(--bg-panel)',
+      border: '1px solid var(--border-neon)',
+      borderRadius: 'var(--radius-md)',
+      overflow: 'hidden',
+      boxShadow: '0 -8px 32px rgba(0,0,0,0.7)',
+    }}>
+      {/* Backend tabs */}
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+        {[{ k: 'anthropic', label: '☁ Anthropic' }, { k: 'ollama', label: '⬡ Ollama' }].map(({ k, label }) => (
+          <button key={k} onMouseDown={e => { e.preventDefault(); onSwitch(k, null); }}
+            style={{
+              flex: 1, padding: '7px 0', fontSize: 11, border: 'none', cursor: 'pointer',
+              background: backend === k ? 'var(--accent-soft)' : 'transparent',
+              color: backend === k ? 'var(--neon-cyan)' : 'var(--text-tertiary)',
+              fontFamily: 'var(--font-mono)', transition: 'background 0.15s',
+            }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {/* Model list */}
+      <div style={{ maxHeight: 200, overflowY: 'auto', padding: '4px 0' }}>
+        {modelList.map(m => {
+          const isActive = m.value ? m.value === activeModel : backend === 'ollama';
+          return (
+            <div key={m.value} onMouseDown={e => { e.preventDefault(); onSwitch(backend, m.value || null); setOpen(false); }}
+              style={{
+                padding: '6px 14px', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                color: isActive ? 'var(--neon-cyan)' : 'var(--text-secondary)',
+                background: isActive ? 'var(--accent-soft)' : 'transparent',
+              }}
+              onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-hover)'; }}
+              onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+            >
+              <span style={{ width: 12, fontSize: 10, color: 'var(--neon-cyan)' }}>{isActive ? '✓' : ''}</span>
+              {m.label}
+            </div>
+          );
+        })}
+      </div>
+      {/* Status bar */}
+      {llmStatus?.backend === 'ollama' && (
+        <div style={{ padding: '5px 14px', fontSize: 10, color: llmStatus.ollama_reachable ? 'var(--neon-green)' : 'var(--warm)', borderTop: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>
+          {llmStatus.ollama_reachable ? '● Ollama reachable' : '○ Ollama unreachable'}
+        </div>
+      )}
+    </div>,
+    document.body
+  );
+
+  return (
+    <>
+      <button ref={triggerRef} onClick={handleOpen} className="voice-btn" title="Switch model"
+        style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '0 7px', fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', minWidth: 0 }}>
+        <Bot size={12} style={{ flexShrink: 0 }} />
+        <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shortName}</span>
+        <ChevronDown size={9} style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
+      </button>
+      {dropdown}
+    </>
+  );
+}
+
+
 function CompliancePanel({ token, onToast, isReady }) {
   const FW_LIST = [
     { key: 'HIPAA',   label: 'HIPAA',    desc: 'Health data privacy' },
@@ -1408,6 +1516,11 @@ export default function App() {
   const [useAgent, setUseAgent] = useState(false);
   const [usePageIndex, setUsePageIndex] = useState(false);
   const [useMemory, setUseMemory] = useState(true);
+
+  // LLM backend
+  const [llmStatus, setLlmStatus] = useState(null);       // {backend, model, ollama_reachable, ...}
+  const [ollamaModels, setOllamaModels] = useState([]);
+
   const [piDocs, setPiDocs] = useState([]);
   const [piActiveDoc, setPiActiveDoc] = useState(null);
   const [showPiUpload, setShowPiUpload] = useState(false);
@@ -1429,6 +1542,28 @@ export default function App() {
 
   const fetchStats = useCallback(() => { api.get('/api/stats', token).then(setStats).catch(() => setStats(null)); }, [token]);
   useEffect(() => { fetchStats(); const i = setInterval(fetchStats, 20000); return () => clearInterval(i); }, [fetchStats]);
+
+  const fetchLlmStatus = useCallback(() => {
+    api.get('/api/llm/status', token).then(d => {
+      setLlmStatus(d);
+      setLlmPickBackend(d.backend);
+      setLlmPickModel(d.model || '');
+    }).catch(() => {});
+  }, [token]);
+  useEffect(() => { if (token) fetchLlmStatus(); }, [fetchLlmStatus, token]);
+
+  const fetchOllamaModels = useCallback(() => {
+    api.get('/api/llm/models', token).then(d => setOllamaModels(d.models || [])).catch(() => {});
+  }, [token]);
+
+  const switchLlm = useCallback(async (backend, model) => {
+    try {
+      await api.post('/api/llm/switch', { backend, model: model || null }, token);
+      fetchLlmStatus();
+    } catch (e) {
+      addToast('error', 'Switch failed: ' + (e.message || e));
+    }
+  }, [token, fetchLlmStatus]); // addToast is stable
 
   const fetchSessions = useCallback(() => { api.get('/api/sessions', token).then(d => setSessions(d.sessions || [])).catch(() => {}); }, [token]);
   useEffect(() => { fetchSessions(); }, [fetchSessions]);
@@ -1636,6 +1771,7 @@ export default function App() {
                 <button className={'preview-btn' + (showMdPreview ? ' active' : '')} onClick={() => setShowMdPreview(!showMdPreview)} title="Markdown preview">
                   {showMdPreview ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
+                <ModelPicker llmStatus={llmStatus} ollamaModels={ollamaModels} onFetchModels={fetchOllamaModels} onSwitch={switchLlm} />
                 {streaming
                   ? <button className="send-btn stop-btn" onClick={() => { if (wsRef.current) { wsRef.current.close(); wsRef.current = null; } }} title="Stop generation"><X size={14} /></button>
                   : <button className="send-btn" onClick={handleSend} disabled={!input.trim() || loading || !isReady}><Send size={14} /></button>
@@ -1699,9 +1835,18 @@ export default function App() {
               ))}
               {usePageIndex && !piActiveDoc && piDocs.length > 0 && <div style={{ fontSize: 10, color: 'var(--warm)', marginTop: 6, fontFamily: 'var(--font-mono)' }}>↑ Select a document to query</div>}
             </>}
+            <div className="pr-section-title">LLM Backend</div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', lineHeight: 2 }}>
+              {llmStatus ? <>
+                Backend: <span style={{ color: llmStatus.backend === 'ollama' ? 'var(--neon-cyan)' : 'var(--neon-green)' }}>{llmStatus.backend}</span><br />
+                Model: {llmStatus.model}<br />
+                {llmStatus.backend === 'ollama' && <>Ollama: <span style={{ color: llmStatus.ollama_reachable ? 'var(--neon-green)' : 'var(--warm)' }}>{llmStatus.ollama_reachable ? 'reachable' : 'unreachable'}</span><br /></>}
+                Memory: {llmStatus.memory_model}
+              </> : '—'}
+              <div style={{ marginTop: 4, color: 'var(--text-tertiary)', opacity: 0.7 }}>Switch model from the chat input bar ↓</div>
+            </div>
             <div className="pr-section-title">System</div>
             <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', lineHeight: 2 }}>
-              Model: {stats ? stats.llm_model : '—'}<br />
               Embeddings: {stats ? stats.embedding_model : '—'}<br />
               Chunks: {stats ? stats.document_count : 0}<br />
               BM25: {stats ? stats.bm25_weight : 0.3} / Vector: {stats ? stats.vector_weight : 0.7}

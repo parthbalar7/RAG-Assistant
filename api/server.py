@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 
 from config import settings
+from core import llm_client as _llm_client
 from core.ingestion import ingest_directory, load_single_file, chunk_document
 from core.retriever import VectorStore, retrieve
 from core.generator import generate, generate_stream, Message, RAGResponse
@@ -641,6 +642,48 @@ async def compliance_scan(req: ComplianceScanReq, user=Depends(require_auth)):
 @app.get("/api/compliance/history")
 async def compliance_history(user=Depends(require_auth)):
     return {"scans": db.get_compliance_history(user["id"])}
+
+
+# ── LLM Backend Endpoints ──
+
+class LLMSwitchReq(BaseModel):
+    backend: str          # "anthropic" or "ollama"
+    model: Optional[str] = None
+
+
+@app.get("/api/llm/status")
+async def llm_status():
+    """Return current backend, active model, and Ollama reachability."""
+    backend = _llm_client.get_backend()
+    return {
+        "backend": backend,
+        "model": _llm_client.get_model(),
+        "memory_model": _llm_client.get_memory_model(),
+        "ollama_url": settings.ollama_base_url,
+        "ollama_reachable": _llm_client.ollama_reachable() if backend == "ollama" else None,
+        "anthropic_key_set": bool(settings.anthropic_api_key),
+    }
+
+
+@app.get("/api/llm/models")
+async def llm_models():
+    """List locally available Ollama models."""
+    models = await asyncio.to_thread(_llm_client.list_ollama_models)
+    return {"models": models, "ollama_url": settings.ollama_base_url}
+
+
+@app.post("/api/llm/switch")
+async def llm_switch(req: LLMSwitchReq, _user=Depends(require_auth)):
+    """Switch LLM backend at runtime (no server restart required)."""
+    try:
+        _llm_client.set_backend(req.backend, req.model)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "backend": _llm_client.get_backend(),
+        "model": _llm_client.get_model(),
+        "memory_model": _llm_client.get_memory_model(),
+    }
 
 
 # ── Memory Endpoints ──

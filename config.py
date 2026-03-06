@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=2048)
     llm_temperature: float = Field(default=0.1)
 
+    # --- Ollama (local LLM) ---
+    llm_backend: str = Field(default="anthropic", description="'anthropic' or 'ollama'")
+    ollama_base_url: str = Field(default="http://localhost:11434", description="Ollama server URL")
+    ollama_model: str = Field(default="qwen2.5-coder:14b", description="Default Ollama chat model")
+    ollama_memory_model: str = Field(default="llama3.2:3b", description="Fast model for memory extraction")
+
     # --- Embeddings ---
     embedding_model: str = Field(default="all-MiniLM-L6-v2")
     embedding_dimension: int = Field(default=384)
@@ -42,7 +48,7 @@ class Settings(BaseSettings):
     # --- Memory (token-optimized) ---
     memory_enabled: bool = Field(default=True, description="Enable long-term memory")
     memory_top_k: int = Field(default=5, description="Memories to retrieve per query")
-    memory_extraction_model: str = Field(default="claude-haiku-3-5-20241022", description="Cheapest model for extraction")
+    memory_extraction_model: str = Field(default="claude-haiku-3-5-20241022", description="Anthropic model for extraction (unused when backend=ollama)")
     memory_auto_extract: bool = Field(default=True, description="Auto-extract after turns")
     memory_auto_summarize: bool = Field(default=True, description="Auto-summarize sessions")
     memory_extract_interval: int = Field(default=3, description="Extract every N turns")

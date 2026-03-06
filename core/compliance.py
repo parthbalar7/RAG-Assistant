@@ -177,17 +177,15 @@ def run_compliance_scan(store, framework: str, sample_size: int = 30) -> Dict[st
         code_context=code_context[:14000],
     )
 
-    from core.generator import get_client
-    client = get_client()
-    resp = client.messages.create(
-        model=settings.llm_model,
+    from core import llm_client
+    raw = llm_client.chat(
+        messages=[{"role": "user", "content": prompt}],
+        system="You are a compliance expert. Return only valid JSON with no markdown fences.",
         max_tokens=2048,
         temperature=0.1,
-        system="You are a compliance expert. Return only valid JSON with no markdown fences.",
-        messages=[{"role": "user", "content": prompt}],
+        stream=False,
     )
-
-    raw = resp.content[0].text.strip()
+    raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
