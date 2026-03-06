@@ -244,6 +244,32 @@ class MemoryStore:
             })
         return fragments
 
+    def get_all_with_embeddings(self, limit=500):
+        """Return all stored memories along with their stored embeddings."""
+        if self.count == 0:
+            return [], []
+        results = self.collection.get(
+            include=["documents", "metadatas", "embeddings"],
+            limit=limit,
+        )
+        fragments = []
+        embeddings = []
+        for i, (doc, meta, emb) in enumerate(zip(
+            results["documents"], results["metadatas"], results["embeddings"]
+        )):
+            fragments.append({
+                "fragment_id": results["ids"][i],
+                "content": doc,
+                "memory_type": meta.get("memory_type", "fact"),
+                "source_session_id": meta.get("source_session_id", ""),
+                "source_query": meta.get("source_query", ""),
+                "importance": meta.get("importance", 0.5),
+                "tags": meta.get("tags", "[]"),
+                "created_at": meta.get("created_at", 0),
+            })
+            embeddings.append(emb)
+        return fragments, embeddings
+
     def delete_fragment(self, fragment_id):
         try:
             self.collection.delete(ids=[fragment_id])
@@ -279,6 +305,34 @@ Return ONLY the JSON array."""
 
 SUMMARIZE_SYSTEM = """Summarize this conversation in 2-3 sentences. Return JSON: {"s":"summary","g":["topic1","topic2"],"i":0.7}
 Return ONLY the JSON object."""
+
+NOVELTY_SYSTEM = """Does this Q&A contain new facts, preferences, decisions, or technical details worth remembering?
+Answer YES if it has: specific facts, user preferences, technical choices, decisions, concrete details.
+Answer NO if it's only: a clarification, rephrasing, follow-up with no new info, or small talk.
+Reply with ONLY "YES" or "NO"."""
+
+MERGE_SYSTEM = """Merge these related memories into one concise, complete statement that captures all key details.
+Return JSON: {"c":"merged content (1-2 sentences)","t":"fact|pref|decision|insight","i":0.8,"g":["tag1","tag2"]}
+Return ONLY the JSON object."""
+
+
+def _has_new_information(query, answer):
+    """Cheap novelty gate: a tiny YES/NO LLM call before running full extraction.
+    Uses max_tokens=5 so this costs almost nothing vs the full extraction call."""
+    try:
+        result = _llm_client.chat(
+            messages=[{"role": "user", "content": "Q: {}\nA: {}".format(
+                query[:200], answer[:350])}],
+            system=NOVELTY_SYSTEM,
+            model=_llm_client.get_memory_model(),
+            max_tokens=5,
+            temperature=0.0,
+            stream=False,
+        )
+        return result.strip().upper().startswith("YES")
+    except Exception as e:
+        logger.warning("Novelty check failed, defaulting to extract: {}".format(e))
+        return True  # fail open: extract anyway
 
 
 def _should_extract(query, answer):
@@ -495,6 +549,126 @@ def optimize_context_chunks(hits):
     return optimized
 
 
+# -- Memory Consolidation --
+
+def _cosine_similarity_matrix(embeddings):
+    """Compute pairwise cosine similarity matrix using numpy (already a dep via sentence-transformers)."""
+    import numpy as np
+    A = np.array(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(A, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    A_norm = A / norms
+    return (A_norm @ A_norm.T).tolist()
+
+
+def _merge_cluster(cluster_mems):
+    """Use LLM to merge a cluster of related memories into one richer memory."""
+    memories_text = "\n".join("- " + m["content"] for m in cluster_mems)
+    max_importance = max(m.get("importance", 0.5) for m in cluster_mems)
+    try:
+        text = _llm_client.chat(
+            messages=[{"role": "user", "content": "Merge these related memories:\n" + memories_text}],
+            system=MERGE_SYSTEM,
+            model=_llm_client.get_memory_model(),
+            max_tokens=150,
+            temperature=0.0,
+            stream=False,
+        )
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.rsplit("```", 1)[0].strip()
+        data = json.loads(text)
+        mem_type = _TYPE_ALIASES.get(data.get("t", "fact"), data.get("t", "fact"))
+        return MemoryFragment(
+            content=data.get("c", ""),
+            memory_type=mem_type,
+            importance=min(1.0, max(max_importance, float(data.get("i", 0.7)))),
+            tags=data.get("g", [])[:2],
+            source_query="consolidation",
+        )
+    except Exception as e:
+        logger.error("Cluster merge failed: {}".format(e))
+        return None
+
+
+def consolidate_memories(mem_store, merge_threshold=0.72):
+    """
+    Scan all memories for semantically related clusters and merge them.
+
+    Memories that are similar enough to be related (above merge_threshold)
+    but not exact duplicates (below the 0.92 dedup threshold) are candidates
+    for consolidation. Each cluster is merged into one richer memory via LLM.
+
+    Args:
+        merge_threshold: Cosine similarity floor for clustering (default 0.72).
+                         Higher = only very close memories merged.
+                         Lower = more aggressive merging.
+
+    Returns:
+        dict with keys: merged (clusters merged), deleted (originals removed), skipped.
+    """
+    if mem_store.count < 3:
+        return {"merged": 0, "deleted": 0, "skipped": 0, "message": "Not enough memories to consolidate"}
+
+    fragments, embeddings = mem_store.get_all_with_embeddings(limit=500)
+    n = len(fragments)
+    if n < 3:
+        return {"merged": 0, "deleted": 0, "skipped": 0, "message": "Not enough memories to consolidate"}
+
+    logger.info("Consolidation: computing similarity matrix for {} memories".format(n))
+    sim_matrix = _cosine_similarity_matrix(embeddings)
+
+    # Greedy clustering: each fragment joins the first cluster it's similar to
+    visited = set()
+    clusters = []
+    for i in range(n):
+        if i in visited:
+            continue
+        cluster = [i]
+        visited.add(i)
+        for j in range(i + 1, n):
+            if j in visited:
+                continue
+            if sim_matrix[i][j] >= merge_threshold:
+                cluster.append(j)
+                visited.add(j)
+        if len(cluster) >= 2:
+            clusters.append(cluster)
+
+    if not clusters:
+        return {"merged": 0, "deleted": 0, "skipped": 0, "message": "No related memory clusters found"}
+
+    logger.info("Consolidation: found {} clusters to merge".format(len(clusters)))
+    merged_count = 0
+    deleted_count = 0
+    skipped = 0
+
+    for cluster_indices in clusters:
+        cluster_mems = [fragments[i] for i in cluster_indices]
+        merged = _merge_cluster(cluster_mems)
+        if merged and merged.content:
+            for m in cluster_mems:
+                mem_store.delete_fragment(m["fragment_id"])
+                deleted_count += 1
+            mem_store.add_fragment(merged)
+            merged_count += 1
+            logger.info("Merged {} memories → 1: {}".format(
+                len(cluster_mems), merged.content[:60]))
+        else:
+            skipped += len(cluster_mems)
+
+    return {
+        "merged": merged_count,
+        "deleted": deleted_count,
+        "skipped": skipped,
+        "message": "Merged {} clusters ({} memories → {} consolidated)".format(
+            merged_count, deleted_count, merged_count),
+    }
+
+
 # -- Global Store Cache --
 
 _memory_stores = {}
@@ -509,7 +683,9 @@ def get_memory_store(user_id="default"):
 def process_turn_memories(user_id, query, answer, session_id=""):
     """
     Full pipeline: extract memories from a turn and store them.
-    Respects interval setting (only runs every N turns).
+    - Respects interval setting (only runs every N turns)
+    - Within each interval, a cheap novelty check gates the full extraction
+      so follow-up / clarification turns never trigger costly extraction calls
     """
     if not settings.memory_enabled or not settings.memory_auto_extract:
         return []
@@ -520,6 +696,11 @@ def process_turn_memories(user_id, query, answer, session_id=""):
     if not should_run:
         logger.debug("Skipping extraction (turn {}, interval {})".format(
             mem_store._turn_counter, settings.memory_extract_interval))
+        return []
+
+    # Cheap novelty gate — saves full extraction cost on clarification turns
+    if not _has_new_information(query, answer):
+        logger.debug("Novelty check: no new info detected, skipping extraction")
         return []
 
     fragments = extract_memories_from_turn(query, answer, session_id)

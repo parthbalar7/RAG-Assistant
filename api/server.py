@@ -29,6 +29,7 @@ from core.compliance import run_compliance_scan, FRAMEWORKS as COMPLIANCE_FRAMEW
 from core.memory import (
     get_memory_store, retrieve_memories, process_turn_memories,
     process_session_summary, MemoryFragment, optimize_context_chunks,
+    consolidate_memories,
 )
 from api import database as db
 from api.auth import hash_password, verify_password, create_token, get_current_user, require_auth, decode_token
@@ -732,6 +733,15 @@ async def memory_clear(user=Depends(get_current_user)):
     mem_store = get_memory_store(uid)
     mem_store.clear()
     return {"status": "cleared"}
+
+
+@app.post("/api/memory/consolidate")
+async def memory_consolidate(user=Depends(get_current_user)):
+    """Merge semantically related memory clusters into single richer memories."""
+    uid = user["id"] if user else "anonymous"
+    mem_store = get_memory_store(uid)
+    result = consolidate_memories(mem_store)
+    return result
 
 
 @app.post("/api/memory/summarize-session/{session_id}")

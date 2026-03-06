@@ -1,14 +1,15 @@
 """
-Tree Indexer — Local PageIndex-style tree generation engine.
+Tree Indexer — 100% Local Tree Generation (Zero LLM Calls)
+═══════════════════════════════════════════════════════════
 
-Converts PDFs into hierarchical tree-structured indexes by:
-1. Extracting text per page using PyMuPDF
-2. Using Claude to detect/generate a table-of-contents tree
-3. Enriching each node with LLM-generated summaries
-4. Persisting the tree index as JSON for fast retrieval
+Converts PDFs into hierarchical tree-structured indexes using ONLY local analysis:
 
-Inspired by the PageIndex framework (https://pageindex.ai).
-Runs 100% locally — only needs your existing Anthropic API key.
+1. PyMuPDF built-in ToC extraction (PDF bookmarks / outline)
+2. Font-size based heading detection (analyzes text blocks for large/bold text)
+3. Regex pattern matching for numbered sections (1.0, 1.1, Chapter 1, etc.)
+4. Text-density based summarization (first sentences of each section)
+
+NO API calls. NO LLM. Runs instantly on any machine.
 """
 
 import json
@@ -19,9 +20,9 @@ import hashlib
 import time
 from pathlib import Path
 from typing import Optional
+from collections import Counter
 
 import fitz  # PyMuPDF
-import anthropic
 
 from config import settings
 
@@ -36,9 +37,7 @@ TREES_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════
 
 def extract_pages(pdf_path: str) -> list[dict]:
-    """Extract text from each page of a PDF.
-    Returns: [{"page": 1, "text": "..."}, ...]
-    """
+    """Extract text from each page of a PDF."""
     doc = fitz.open(pdf_path)
     pages = []
     for i, page in enumerate(doc):
@@ -53,221 +52,375 @@ def extract_pages(pdf_path: str) -> list[dict]:
     return pages
 
 
-def pages_to_tagged_text(pages: list[dict], start: int = 0, end: int = None) -> str:
-    """Convert pages to tagged text with <page_N> markers for LLM consumption."""
-    end = end or len(pages)
-    parts = []
-    for p in pages[start:end]:
-        parts.append(f"<page_{p['page']}>\n{p['text']}\n</page_{p['page']}>")
-    return "\n\n".join(parts)
+def _extract_text_blocks(pdf_path: str) -> list[dict]:
+    """Extract text blocks with font info for heading detection.
+    Returns list of: {page, text, font_size, is_bold, y_pos, block_idx}
+    """
+    doc = fitz.open(pdf_path)
+    blocks = []
+
+    for page_idx, page in enumerate(doc):
+        page_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+
+        for block_idx, block in enumerate(page_dict.get("blocks", [])):
+            if block.get("type") != 0:  # text block only
+                continue
+
+            for line in block.get("lines", []):
+                line_text = ""
+                max_font_size = 0
+                is_bold = False
+
+                for span in line.get("spans", []):
+                    line_text += span.get("text", "")
+                    font_size = span.get("size", 12)
+                    font_name = span.get("font", "").lower()
+
+                    if font_size > max_font_size:
+                        max_font_size = font_size
+
+                    if "bold" in font_name or "black" in font_name or "heavy" in font_name:
+                        is_bold = True
+
+                    # Some PDFs use font flags instead of name
+                    flags = span.get("flags", 0)
+                    if flags & 2 ** 4:  # bit 4 = bold
+                        is_bold = True
+
+                line_text = line_text.strip()
+                if not line_text:
+                    continue
+
+                blocks.append({
+                    "page": page_idx + 1,
+                    "text": line_text,
+                    "font_size": round(max_font_size, 1),
+                    "is_bold": is_bold,
+                    "y_pos": line.get("bbox", [0, 0, 0, 0])[1],
+                    "block_idx": block_idx,
+                })
+
+    doc.close()
+    return blocks
 
 
 # ═══════════════════════════════════════════
-#  LLM Helpers
+#  Strategy 1: PDF Built-in ToC (Bookmarks)
 # ═══════════════════════════════════════════
 
-def _call_claude(system: str, prompt: str, max_tokens: int = 4096) -> str:
-    """Call Claude for tree generation tasks."""
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    resp = client.messages.create(
-        model=settings.llm_model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-    )
-    return resp.content[0].text
+def _extract_pdf_toc(pdf_path: str) -> list[dict]:
+    """Extract table of contents from PDF bookmarks/outline.
+    PyMuPDF returns: [[level, title, page_number], ...]
+    """
+    doc = fitz.open(pdf_path)
+    toc = doc.get_toc(simple=True)
+    total_pages = doc.page_count
+    doc.close()
+
+    if not toc or len(toc) < 2:
+        return []
+
+    entries = []
+    for level, title, page in toc:
+        title = title.strip()
+        if not title or page < 1:
+            continue
+        entries.append({
+            "level": level,
+            "title": title,
+            "start_page": page,
+        })
+
+    if not entries:
+        return []
+
+    for i, entry in enumerate(entries):
+        end_page = total_pages
+        for j in range(i + 1, len(entries)):
+            if entries[j]["level"] <= entry["level"]:
+                end_page = entries[j]["start_page"] - 1
+                break
+        entry["end_page"] = max(entry["start_page"], end_page)
+
+    logger.info(f"Extracted {len(entries)} ToC entries from PDF bookmarks")
+    return entries
 
 
-# ═══════════════════════════════════════════
-#  Phase 1: Detect or Generate ToC
-# ═══════════════════════════════════════════
+def _toc_entries_to_tree(entries: list[dict], pages: list[dict]) -> list[dict]:
+    """Convert flat ToC entries with levels into a nested tree."""
+    if not entries:
+        return []
 
-TOC_DETECTION_SYSTEM = """You are an expert document analyst. Your task is to examine the first pages of a document and determine if there is an explicit Table of Contents (ToC).
+    root_nodes = []
+    stack = []  # (level, node)
 
-If a ToC exists, extract it as a structured JSON tree.
-If no ToC exists, generate one by analyzing the document structure (headings, sections, topic changes).
+    for entry in entries:
+        node = {
+            "title": entry["title"],
+            "start_page": entry["start_page"],
+            "end_page": entry["end_page"],
+            "summary": _extract_summary_local(pages, entry["start_page"], entry["end_page"]),
+            "children": [],
+        }
 
-Output ONLY valid JSON — no markdown fences, no explanation."""
+        level = entry["level"]
 
-TOC_DETECTION_PROMPT = """Analyze this document and produce a hierarchical tree structure (like a table of contents).
+        while stack and stack[-1][0] >= level:
+            stack.pop()
 
-DOCUMENT TEXT (first {n_pages} pages):
-{text}
+        if stack:
+            stack[-1][1]["children"].append(node)
+        else:
+            root_nodes.append(node)
 
-RULES:
-1. Each node must have: "title" (string), "start_page" (int), "end_page" (int), "summary" (1-2 sentence description)
-2. Nodes can have "children" (array of child nodes) for subsections
-3. Page numbers must be actual page numbers from the <page_N> tags
-4. Every page in the document must be covered by at least one node
-5. Keep the hierarchy 2-4 levels deep maximum
-6. Title should be extracted from the actual document text when possible
+        stack.append((level, node))
 
-Output this exact JSON structure:
-{{
-  "title": "Document Title",
-  "total_pages": {total_pages},
-  "description": "Brief document description",
-  "nodes": [
-    {{
-      "title": "Section Title",
-      "start_page": 1,
-      "end_page": 5,
-      "summary": "What this section covers",
-      "children": [
-        {{
-          "title": "Subsection Title",
-          "start_page": 1,
-          "end_page": 3,
-          "summary": "What this subsection covers",
-          "children": []
-        }}
-      ]
-    }}
-  ]
-}}"""
-
-
-def _detect_or_generate_toc(pages: list[dict], toc_check_pages: int = 20) -> dict:
-    """Use Claude to detect an existing ToC or generate one from the document structure."""
-    check_pages = min(toc_check_pages, len(pages))
-    text = pages_to_tagged_text(pages, 0, check_pages)
-
-    prompt = TOC_DETECTION_PROMPT.format(
-        n_pages=check_pages,
-        text=text,
-        total_pages=len(pages),
-    )
-
-    raw = _call_claude(TOC_DETECTION_SYSTEM, prompt, max_tokens=8192)
-
-    # Clean and parse JSON
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-
-    try:
-        tree = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse ToC JSON from first attempt, retrying with full doc...")
-        tree = _generate_toc_from_full_doc(pages)
-
-    return tree
+    return root_nodes
 
 
 # ═══════════════════════════════════════════
-#  Phase 1b: Full-doc fallback for long docs
+#  Strategy 2: Font-Size Based Heading Detection
 # ═══════════════════════════════════════════
 
-def _generate_toc_from_full_doc(pages: list[dict]) -> dict:
-    """For docs where the first N pages don't have a clear ToC,
-    sample pages throughout the doc and generate a structure."""
-    # Sample: first 5, every 10th page, last 5
-    sampled_indices = set(range(min(5, len(pages))))
-    sampled_indices.update(range(0, len(pages), max(1, len(pages) // 15)))
-    sampled_indices.update(range(max(0, len(pages) - 5), len(pages)))
-    sampled = sorted(sampled_indices)
+def _detect_headings_by_font(text_blocks: list[dict], pages: list[dict]) -> list[dict]:
+    """Detect headings by analyzing font sizes across the document."""
+    if not text_blocks:
+        return []
 
-    text_parts = []
-    for i in sampled:
-        p = pages[i]
-        text_parts.append(f"<page_{p['page']}>\n{p['text'][:2000]}\n</page_{p['page']}>")
-    text = "\n\n".join(text_parts)
+    font_sizes = [b["font_size"] for b in text_blocks if len(b["text"]) > 10]
+    if not font_sizes:
+        return []
 
-    prompt = f"""Analyze these sampled pages from a {len(pages)}-page document and generate a hierarchical tree structure.
+    size_counts = Counter(round(s, 0) for s in font_sizes)
+    body_size = size_counts.most_common(1)[0][0]
 
-SAMPLED PAGES:
-{text}
+    heading_sizes = sorted(set(
+        round(b["font_size"], 0) for b in text_blocks
+        if b["font_size"] > body_size * 1.15
+        and len(b["text"].strip()) > 2
+        and len(b["text"].strip()) < 200
+    ), reverse=True)
 
-Generate a JSON tree covering ALL {len(pages)} pages. Infer section boundaries from content changes.
-Output ONLY valid JSON with this structure:
-{{"title": "...", "total_pages": {len(pages)}, "description": "...", "nodes": [
-  {{"title": "...", "start_page": N, "end_page": M, "summary": "...", "children": []}}
-]}}"""
+    if not heading_sizes:
+        heading_sizes = [body_size]
+        bold_only = True
+    else:
+        bold_only = False
 
-    raw = _call_claude(TOC_DETECTION_SYSTEM, prompt, max_tokens=8192)
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
+    size_to_level = {}
+    for i, size in enumerate(heading_sizes[:4]):
+        size_to_level[size] = i + 1
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # Ultimate fallback: one node per ~10 pages
-        return _fallback_flat_tree(pages)
+    headings = []
+    for block in text_blocks:
+        text = block["text"].strip()
+        font_rounded = round(block["font_size"], 0)
+
+        is_heading = False
+        level = 3
+
+        if font_rounded in size_to_level:
+            is_heading = True
+            level = size_to_level[font_rounded]
+        elif bold_only and block["is_bold"] and font_rounded >= body_size:
+            is_heading = True
+            level = 2
+
+        if is_heading:
+            if len(text) > 150:
+                is_heading = False
+            if text.isdigit() or len(text) < 2:
+                is_heading = False
+
+        if is_heading:
+            headings.append({
+                "level": level,
+                "title": text[:120],
+                "start_page": block["page"],
+                "font_size": block["font_size"],
+                "is_bold": block["is_bold"],
+            })
+
+    if not headings:
+        return []
+
+    seen = set()
+    unique_headings = []
+    for h in headings:
+        key = (h["title"][:50], h["start_page"])
+        if key not in seen:
+            seen.add(key)
+            unique_headings.append(h)
+
+    total_pages = len(pages)
+    for i, h in enumerate(unique_headings):
+        end_page = total_pages
+        for j in range(i + 1, len(unique_headings)):
+            if unique_headings[j]["level"] <= h["level"]:
+                end_page = unique_headings[j]["start_page"] - 1
+                break
+        h["end_page"] = max(h["start_page"], end_page)
+
+    logger.info(f"Detected {len(unique_headings)} headings by font analysis (body={body_size}pt)")
+    return unique_headings
 
 
-def _fallback_flat_tree(pages: list[dict]) -> dict:
-    """Absolute fallback: create a flat tree with sections every ~10 pages."""
+# ═══════════════════════════════════════════
+#  Strategy 3: Regex Pattern Matching
+# ═══════════════════════════════════════════
+
+HEADING_PATTERNS = [
+    (r'^(?:CHAPTER|Chapter)\s+(\d+)\s*[:\-–—.]\s*(.+)', 1),
+    (r'^(?:PART|Part)\s+([IVXLCDM]+|\d+)\s*[:\-–—.]\s*(.+)', 1),
+    (r'^(\d{1,2})\.\s+([A-Z].{2,80})$', 1),
+    (r'^(\d{1,2}\.\d{1,2})\.?\s+(.{3,80})$', 2),
+    (r'^(\d{1,2}\.\d{1,2}\.\d{1,2})\.?\s+(.{3,80})$', 3),
+    (r'^(?:Section|SECTION)\s+(\d+(?:\.\d+)*)\s*[:\-–—.]\s*(.+)', 2),
+    (r'^([IVXLCDM]{1,5})\.\s+([A-Z].{2,80})$', 1),
+    (r'^([A-Z])\.\s+([A-Z].{2,80})$', 2),
+    (r'^(?:Appendix|APPENDIX)\s+([A-Z])\s*[:\-–—.]\s*(.+)', 1),
+    (r'^([A-Z][A-Z\s]{8,60})$', 1),
+]
+
+
+def _detect_headings_by_pattern(pages: list[dict]) -> list[dict]:
+    """Detect headings using regex patterns on page text."""
+    headings = []
+
+    for page in pages:
+        lines = page["text"].split("\n")
+        for line in lines:
+            line = line.strip()
+            if not line or len(line) < 3 or len(line) > 200:
+                continue
+
+            for pattern, level in HEADING_PATTERNS:
+                match = re.match(pattern, line)
+                if match:
+                    groups = match.groups()
+                    title = groups[-1].strip() if len(groups) >= 2 else line.strip()
+
+                    if len(title) < 3 or title.isdigit():
+                        continue
+
+                    if pattern == HEADING_PATTERNS[-1][0]:
+                        words = title.split()
+                        if len(words) < 2 or len(title) > 50:
+                            continue
+
+                    headings.append({
+                        "level": level,
+                        "title": title[:120],
+                        "start_page": page["page"],
+                    })
+                    break
+
+    if not headings:
+        return []
+
+    seen = set()
+    unique = []
+    for h in headings:
+        key = (h["title"][:50], h["start_page"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(h)
+
+    total = len(pages)
+    for i, h in enumerate(unique):
+        end = total
+        for j in range(i + 1, len(unique)):
+            if unique[j]["level"] <= h["level"]:
+                end = unique[j]["start_page"] - 1
+                break
+        h["end_page"] = max(h["start_page"], end)
+
+    logger.info(f"Detected {len(unique)} headings by pattern matching")
+    return unique
+
+
+# ═══════════════════════════════════════════
+#  Strategy 4: Fallback — Even Page Splits
+# ═══════════════════════════════════════════
+
+def _fallback_flat_tree(pages: list[dict]) -> list[dict]:
+    """Fallback: split document into even sections based on page count."""
+    total = len(pages)
+    if total <= 5:
+        chunk_size = 1
+    elif total <= 20:
+        chunk_size = 5
+    elif total <= 100:
+        chunk_size = 10
+    else:
+        chunk_size = max(10, total // 10)
+
     nodes = []
-    chunk_size = min(10, max(1, len(pages) // 5))
-    for i in range(0, len(pages), chunk_size):
-        end = min(i + chunk_size, len(pages))
+    for i in range(0, total, chunk_size):
+        end = min(i + chunk_size, total)
+        first_page_text = pages[i]["text"]
+        title = _guess_section_title(first_page_text, i + 1, end)
         nodes.append({
-            "title": f"Section (Pages {i+1}-{end})",
+            "title": title,
             "start_page": i + 1,
             "end_page": end,
-            "summary": f"Content from pages {i+1} to {end}",
+            "summary": _extract_summary_local(pages, i + 1, end),
             "children": [],
         })
-    return {
-        "title": "Document",
-        "total_pages": len(pages),
-        "description": "Auto-generated flat structure",
-        "nodes": nodes,
-    }
+
+    logger.info(f"Generated fallback flat tree with {len(nodes)} sections")
+    return nodes
+
+
+def _guess_section_title(text: str, start_page: int, end_page: int) -> str:
+    """Try to extract a reasonable title from the first few lines of text."""
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    for line in lines[:5]:
+        if 5 <= len(line) <= 80:
+            alpha_ratio = sum(1 for c in line if c.isalpha()) / max(len(line), 1)
+            if alpha_ratio > 0.5:
+                return line
+    return f"Pages {start_page}–{end_page}"
 
 
 # ═══════════════════════════════════════════
-#  Phase 2: Enrich nodes with summaries
+#  Local Summary Extraction (No LLM)
 # ═══════════════════════════════════════════
 
-SUMMARY_SYSTEM = """You are a document analyst. Summarize the given section concisely in 2-3 sentences.
-Focus on the key topics, findings, or arguments. Output ONLY the summary text."""
+def _extract_summary_local(pages: list[dict], start_page: int, end_page: int) -> str:
+    """Extract a summary by taking the first meaningful sentences from a section."""
+    text_parts = []
+    for p in pages:
+        if start_page <= p["page"] <= end_page:
+            text_parts.append(p["text"])
 
+    full_text = " ".join(text_parts)
+    if not full_text.strip():
+        return ""
 
-def _enrich_node_summaries(tree: dict, pages: list[dict], max_depth: int = 3, depth: int = 0) -> dict:
-    """Recursively enrich tree nodes with better summaries using actual page content."""
-    if depth >= max_depth:
-        return tree
+    full_text = re.sub(r'\s+', ' ', full_text).strip()
+    sentences = re.split(r'(?<=[.!?])\s+', full_text)
 
-    nodes = tree.get("nodes", [])
-    for node in nodes:
-        start = node.get("start_page", 1) - 1
-        end = node.get("end_page", start + 1)
-        # Get actual text (limited to ~3000 chars for speed)
-        section_text = ""
-        for p in pages[start:end]:
-            section_text += p["text"][:1500] + "\n"
-            if len(section_text) > 4000:
-                break
+    summary_sentences = []
+    for sent in sentences:
+        sent = sent.strip()
+        if len(sent) > 20:
+            summary_sentences.append(sent)
+        if len(summary_sentences) >= 2:
+            break
 
-        if section_text.strip() and (not node.get("summary") or len(node.get("summary", "")) < 20):
-            try:
-                summary = _call_claude(
-                    SUMMARY_SYSTEM,
-                    f"Section: {node.get('title', 'Untitled')}\n\nContent:\n{section_text[:4000]}",
-                    max_tokens=200,
-                )
-                node["summary"] = summary.strip()
-            except Exception as e:
-                logger.warning(f"Failed to summarize node '{node.get('title')}': {e}")
-
-        # Recurse into children
-        if node.get("children"):
-            _enrich_node_summaries(node, pages, max_depth, depth + 1)
-
-    return tree
+    summary = " ".join(summary_sentences)
+    if len(summary) > 200:
+        summary = summary[:197] + "..."
+    return summary
 
 
 # ═══════════════════════════════════════════
-#  Phase 3: Assign node IDs
+#  Node ID Assignment
 # ═══════════════════════════════════════════
 
 def _assign_node_ids(nodes: list, prefix: str = "") -> None:
-    """Assign hierarchical node IDs like 0001, 0002, etc."""
+    """Assign hierarchical node IDs like 0001, 0002, 0001.0001."""
     for i, node in enumerate(nodes):
         node["node_id"] = f"{prefix}{i+1:04d}" if prefix else f"{i+1:04d}"
         if node.get("children"):
@@ -275,7 +428,7 @@ def _assign_node_ids(nodes: list, prefix: str = "") -> None:
 
 
 # ═══════════════════════════════════════════
-#  Main: Generate Tree Index
+#  Main Pipeline: Generate Tree Index
 # ═══════════════════════════════════════════
 
 def generate_tree_index(
@@ -286,68 +439,103 @@ def generate_tree_index(
 ) -> dict:
     """Full pipeline: PDF → tree-structured index.
 
-    Returns: {
-        "doc_id": "local-xxx",
-        "title": "...",
-        "total_pages": N,
-        "description": "...",
-        "nodes": [...],
-        "pages": [...],  # raw page texts
-        "source_file": "...",
-        "created_at": "..."
-    }
+    Tries strategies in order:
+    1. PDF built-in ToC (bookmarks/outline) — best quality, instant
+    2. Font-size heading detection — analyzes text block sizes
+    3. Regex pattern matching — detects "Chapter 1", "1.1", etc.
+    4. Fallback even splits — divides by page count
+
+    Returns: {doc_id, title, total_pages, description, nodes, pages, ...}
     """
     pdf_path = str(pdf_path)
     doc_id = _doc_id_from_path(pdf_path)
 
-    # Check cache
     cache_path = TREES_DIR / f"{doc_id}.json"
     if cache_path.exists() and not force_rebuild:
         logger.info(f"Loading cached tree index for {doc_id}")
         with open(cache_path) as f:
             return json.load(f)
 
-    logger.info(f"Generating tree index for {pdf_path}...")
+    logger.info(f"Generating tree index for {pdf_path} (local analysis, zero LLM calls)...")
     start = time.time()
 
-    # 1. Extract pages
     pages = extract_pages(pdf_path)
     if not pages:
         raise ValueError(f"No text extracted from {pdf_path}")
 
-    # 2. Generate/detect ToC tree
-    tree = _detect_or_generate_toc(pages, toc_check_pages)
+    total_pages = len(pages)
+    tree_nodes = []
+    method_used = "none"
 
-    # 3. Assign node IDs
-    _assign_node_ids(tree.get("nodes", []))
+    # Strategy 1: PDF Built-in ToC
+    toc_entries = _extract_pdf_toc(pdf_path)
+    if len(toc_entries) >= 3:
+        tree_nodes = _toc_entries_to_tree(toc_entries, pages)
+        method_used = "pdf_toc"
+        logger.info(f"Strategy 1 (PDF ToC): {len(tree_nodes)} top-level nodes")
 
-    # 4. Optionally enrich summaries with actual content
-    if enrich_summaries and len(pages) <= 200:
-        tree = _enrich_node_summaries(tree, pages)
+    # Strategy 2: Font-size heading detection
+    if not tree_nodes:
+        text_blocks = _extract_text_blocks(pdf_path)
+        font_headings = _detect_headings_by_font(text_blocks, pages)
+        if len(font_headings) >= 3:
+            tree_nodes = _toc_entries_to_tree(font_headings, pages)
+            method_used = "font_analysis"
+            logger.info(f"Strategy 2 (Font analysis): {len(tree_nodes)} top-level nodes")
 
-    # 5. Assemble final result
+    # Strategy 3: Regex pattern matching
+    if not tree_nodes:
+        pattern_headings = _detect_headings_by_pattern(pages)
+        if len(pattern_headings) >= 3:
+            tree_nodes = _toc_entries_to_tree(pattern_headings, pages)
+            method_used = "pattern_matching"
+            logger.info(f"Strategy 3 (Pattern matching): {len(tree_nodes)} top-level nodes")
+
+    # Strategy 4: Fallback even splits
+    if not tree_nodes:
+        tree_nodes = _fallback_flat_tree(pages)
+        method_used = "fallback_split"
+        logger.info(f"Strategy 4 (Fallback split): {len(tree_nodes)} sections")
+
+    _assign_node_ids(tree_nodes)
+
+    doc_title = _extract_document_title(pages, pdf_path)
+    doc_description = _extract_summary_local(pages, 1, min(3, total_pages))
+
     result = {
         "doc_id": doc_id,
-        "title": tree.get("title", Path(pdf_path).stem),
-        "total_pages": len(pages),
-        "description": tree.get("description", ""),
-        "nodes": tree.get("nodes", []),
+        "title": doc_title,
+        "total_pages": total_pages,
+        "description": doc_description,
+        "nodes": tree_nodes,
         "pages": [{"page": p["page"], "text": p["text"]} for p in pages],
         "source_file": os.path.basename(pdf_path),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "generation_time_s": round(time.time() - start, 1),
+        "generation_time_s": round(time.time() - start, 2),
+        "method": method_used,
     }
 
-    # 6. Cache
     with open(cache_path, "w") as f:
         json.dump(result, f, indent=2)
-    logger.info(f"Tree index generated in {result['generation_time_s']}s → {cache_path}")
+    logger.info(f"Tree index generated in {result['generation_time_s']}s via {method_used} → {cache_path}")
 
     return result
 
 
+def _extract_document_title(pages: list[dict], pdf_path: str) -> str:
+    """Try to extract document title from first page or filename."""
+    if pages:
+        first_lines = [l.strip() for l in pages[0]["text"].split("\n") if l.strip()]
+        for line in first_lines[:5]:
+            if 5 <= len(line) <= 100:
+                alpha_ratio = sum(1 for c in line if c.isalpha()) / max(len(line), 1)
+                if alpha_ratio > 0.6:
+                    return line
+    return Path(pdf_path).stem.replace("_", " ").replace("-", " ").title()
+
+
 def _doc_id_from_path(pdf_path: str) -> str:
-    """Generate a stable doc_id from file path + modification time."""
+    """Generate a stable doc_id from file path + size + mtime."""
     stat = os.stat(pdf_path)
     key = f"{pdf_path}:{stat.st_size}:{stat.st_mtime}"
     return "local-" + hashlib.sha256(key.encode()).hexdigest()[:16]
@@ -370,6 +558,7 @@ def get_stored_trees() -> list[dict]:
                     "total_pages": data.get("total_pages", 0),
                     "source_file": data.get("source_file", ""),
                     "created_at": data.get("created_at", ""),
+                    "method": data.get("method", "unknown"),
                 })
         except Exception:
             continue
@@ -382,7 +571,6 @@ def get_tree_by_id(doc_id: str) -> Optional[dict]:
     if cache_path.exists():
         with open(cache_path) as f:
             return json.load(f)
-    # Search all files
     for f in TREES_DIR.glob("*.json"):
         try:
             with open(f) as fh:

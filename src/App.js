@@ -1303,6 +1303,8 @@ function MemoryPanel({ token, onToast }) {
   const [showAdd, setShowAdd] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [stats, setStats] = useState({ total: 0, types: {} });
+  const [consolidating, setConsolidating] = useState(false);
+  const [consolidateResult, setConsolidateResult] = useState(null);
 
   const fetchMemories = useCallback(async () => {
     setLoading(true);
@@ -1351,6 +1353,24 @@ function MemoryPanel({ token, onToast }) {
       setMemories([]); setStats({ total: 0, types: {} });
       onToast('info', 'All memories cleared');
     } catch (e) { onToast('error', 'Clear failed'); }
+  };
+
+  const handleConsolidate = async () => {
+    setConsolidating(true); setConsolidateResult(null);
+    try {
+      const h = { 'Content-Type': 'application/json' };
+      if (token) h['Authorization'] = 'Bearer ' + token;
+      const r = await fetch(API + '/api/memory/consolidate', { method: 'POST', headers: h });
+      const data = await r.json();
+      setConsolidateResult(data);
+      if (data.merged > 0) {
+        onToast('success', data.message);
+        fetchMemories();
+      } else {
+        onToast('info', data.message || 'Nothing to consolidate');
+      }
+    } catch (e) { onToast('error', 'Consolidation failed'); }
+    setConsolidating(false);
   };
 
   const handleAdd = async (content, memType, importance) => {
@@ -1404,10 +1424,20 @@ function MemoryPanel({ token, onToast }) {
         <button onClick={handleSearch} disabled={searching || !searchQuery.trim()} style={{ padding: '0 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-neon)', background: 'var(--accent-soft)', color: 'var(--neon-cyan)', cursor: 'pointer', fontSize: 11 }}>{searching ? '...' : 'Go'}</button>
       </div>
       {searchResults !== null && <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8, fontFamily: 'var(--font-mono)' }}>{searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for "{searchQuery}"</div>}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
         <button className="sl-footer-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => setShowAdd(true)}><PlusCircle size={11} /> Add Memory</button>
-        {stats.total > 0 && <button className="sl-footer-btn danger" style={{ justifyContent: 'center' }} onClick={handleClear}><Trash2 size={11} /></button>}
+        {stats.total > 0 && <>
+          <button className="sl-footer-btn" style={{ justifyContent: 'center', borderColor: 'var(--border-neon)', color: 'var(--neon-purple)' }} onClick={handleConsolidate} disabled={consolidating} title="Merge semantically related memories into fewer, richer ones">
+            <Sparkles size={11} /> {consolidating ? '…' : 'Consolidate'}
+          </button>
+          <button className="sl-footer-btn danger" style={{ justifyContent: 'center' }} onClick={handleClear}><Trash2 size={11} /></button>
+        </>}
       </div>
+      {consolidateResult && (
+        <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: consolidateResult.merged > 0 ? 'var(--neon-green)' : 'var(--text-tertiary)', marginBottom: 10, padding: '6px 8px', borderRadius: 'var(--radius-sm)', background: consolidateResult.merged > 0 ? 'rgba(34,245,160,0.06)' : 'var(--bg-surface)', border: '1px solid var(--border)' }}>
+          {consolidateResult.message}
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {displayList.length === 0 && <div style={{ textAlign: 'center', padding: 24, color: 'var(--text-tertiary)', fontSize: 12 }}>
           <Brain size={28} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.3 }} />
@@ -1788,13 +1818,13 @@ export default function App() {
       {/* ── Right Panel ── */}
       <aside className={'panel-right ' + (rightOpen ? '' : 'collapsed')} style={rightOpen ? { width: rightWidth, minWidth: rightWidth } : {}}>
         <div className="pr-tabs">
-          <button className={'pr-tab ' + (rightTab === 'files' ? 'active' : '')} onClick={() => setRightTab('files')}><FolderTree size={12} /> Files</button>
-          <button className={'pr-tab ' + (rightTab === 'memory' ? 'active' : '')} onClick={() => setRightTab('memory')}><Brain size={12} /> Memory</button>
-          <button className={'pr-tab ' + (rightTab === 'analytics' ? 'active' : '')} onClick={() => setRightTab('analytics')}><BarChart3 size={12} /> Analytics</button>
-          <button className={'pr-tab ' + (rightTab === 'radar' ? 'active' : '')} onClick={() => setRightTab('radar')}><Sparkles size={12} /> Radar</button>
-          <button className={'pr-tab ' + (rightTab === 'eval' ? 'active' : '')} onClick={() => setRightTab('eval')}><Search size={12} /> Eval</button>
-          <button className={'pr-tab ' + (rightTab === 'compliance' ? 'active' : '')} onClick={() => setRightTab('compliance')}><AlertCircle size={12} /> Compliance</button>
-          <button className={'pr-tab ' + (rightTab === 'settings' ? 'active' : '')} onClick={() => setRightTab('settings')}><Settings size={12} /> Settings</button>
+          <button className={'pr-tab ' + (rightTab === 'files' ? 'active' : '')} onClick={() => setRightTab('files')} title="Files"><FolderTree size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'memory' ? 'active' : '')} onClick={() => setRightTab('memory')} title="Memory"><Brain size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'analytics' ? 'active' : '')} onClick={() => setRightTab('analytics')} title="Analytics"><BarChart3 size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'radar' ? 'active' : '')} onClick={() => setRightTab('radar')} title="Knowledge Radar"><Sparkles size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'eval' ? 'active' : '')} onClick={() => setRightTab('eval')} title="Evaluation"><Search size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'compliance' ? 'active' : '')} onClick={() => setRightTab('compliance')} title="Compliance"><AlertCircle size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'settings' ? 'active' : '')} onClick={() => setRightTab('settings')} title="Settings"><Settings size={15} /></button>
         </div>
         <div className="pr-content">
           {rightTab === 'files' && <FileTreePanel refreshKey={filesRefreshKey} token={token} onToast={addToast} />}
@@ -1803,55 +1833,98 @@ export default function App() {
           {rightTab === 'eval' && <EvalPanel token={token} onToast={addToast} isReady={isReady} />}
           {rightTab === 'radar' && <IntegrityRadarPanel token={token} addToast={addToast} isReady={isReady} />}
           {rightTab === 'compliance' && <CompliancePanel token={token} onToast={addToast} isReady={isReady} />}
-          {rightTab === 'settings' && <>
-            <div className="pr-section-title">Retrieval</div>
-            <div className="setting-row"><span>Hybrid search</span><div className={'toggle ' + (useHybrid ? 'on' : '')} onClick={() => setUseHybrid(!useHybrid)} /></div>
-            <div className="setting-row"><span>Reranking</span><div className={'toggle ' + (useReranking ? 'on' : '')} onClick={() => setUseReranking(!useReranking)} /></div>
-            <div className="setting-row"><span>Query routing</span><div className={'toggle ' + (useRouting ? 'on' : '')} onClick={() => setUseRouting(!useRouting)} /></div>
-            <div className="pr-section-title">Generation</div>
-            <div className="setting-row"><span>Stream responses</span><div className={'toggle ' + (useStreaming ? 'on' : '')} onClick={() => setUseStreaming(!useStreaming)} /></div>
-            <div className="setting-row"><span>Agent mode</span><div className={'toggle ' + (useAgent ? 'on' : '')} onClick={() => setUseAgent(!useAgent)} /></div>
-            <div className="pr-section-title">Memory</div>
-            <div className="setting-row"><span><Brain size={12} style={{ verticalAlign: -2 }} /> Long-term memory</span><div className={'toggle ' + (useMemory ? 'on' : '')} onClick={() => setUseMemory(!useMemory)} /></div>
-            {useMemory && <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', marginBottom: 8, lineHeight: 1.6 }}>
-              Extracts facts & preferences from conversations. Retrieved via embeddings before each response.
-            </div>}
-            <div className="pr-section-title">PageIndex (PDF)</div>
-            <div className="setting-row"><span>Enable tree search</span><div className={'toggle ' + (usePageIndex ? 'on' : '')} onClick={() => setUsePageIndex(!usePageIndex)} /></div>
-            {usePageIndex && <>
-              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', marginBottom: 8, lineHeight: 1.6 }}>
-                Local reasoning-based RAG for PDFs. No external API needed.
+          {rightTab === 'settings' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+              <div className="settings-card">
+                <div className="settings-card-title">Retrieval</div>
+                <div className="setting-row"><span>Hybrid search</span><div className={'toggle ' + (useHybrid ? 'on' : '')} onClick={() => setUseHybrid(!useHybrid)} /></div>
+                <div className="setting-row"><span>Reranking</span><div className={'toggle ' + (useReranking ? 'on' : '')} onClick={() => setUseReranking(!useReranking)} /></div>
+                <div className="setting-row"><span>Query routing</span><div className={'toggle ' + (useRouting ? 'on' : '')} onClick={() => setUseRouting(!useRouting)} /></div>
               </div>
-              <button className="sl-footer-btn" style={{ marginBottom: 8 }} onClick={() => setShowPiUpload(true)}>
-                <Upload size={12} /> Upload PDF
-              </button>
-              {piDocs.map((d, i) => (
-                <div key={i} className="file-item" style={{ cursor: 'pointer', background: piActiveDoc === d.doc_id ? 'var(--accent-soft)' : undefined, borderRadius: 'var(--radius-sm)', border: piActiveDoc === d.doc_id ? '1px solid var(--border-neon)' : '1px solid transparent' }}
-                  onClick={() => setPiActiveDoc(piActiveDoc === d.doc_id ? null : d.doc_id)}>
-                  <FileText size={12} style={{ color: piActiveDoc === d.doc_id ? 'var(--neon-cyan)' : 'var(--text-tertiary)' }} />
-                  <span style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.filename}</span>
-                  <span className="file-lang" style={{ background: d.status === 'completed' ? 'rgba(34,245,160,0.1)' : 'rgba(245,158,11,0.1)', color: d.status === 'completed' ? 'var(--neon-green)' : 'var(--warm)' }}>{d.status === 'completed' ? 'ready' : d.status}</span>
+
+              <div className="settings-card">
+                <div className="settings-card-title">Generation</div>
+                <div className="setting-row"><span>Stream responses</span><div className={'toggle ' + (useStreaming ? 'on' : '')} onClick={() => setUseStreaming(!useStreaming)} /></div>
+                <div className="setting-row"><span>Agent mode</span><div className={'toggle ' + (useAgent ? 'on' : '')} onClick={() => setUseAgent(!useAgent)} /></div>
+              </div>
+
+              <div className="settings-card">
+                <div className="settings-card-title">Memory</div>
+                <div className="setting-row">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><Brain size={12} /> Long-term memory</span>
+                  <div className={'toggle ' + (useMemory ? 'on' : '')} onClick={() => setUseMemory(!useMemory)} />
                 </div>
-              ))}
-              {usePageIndex && !piActiveDoc && piDocs.length > 0 && <div style={{ fontSize: 10, color: 'var(--warm)', marginTop: 6, fontFamily: 'var(--font-mono)' }}>↑ Select a document to query</div>}
-            </>}
-            <div className="pr-section-title">LLM Backend</div>
-            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', lineHeight: 2 }}>
-              {llmStatus ? <>
-                Backend: <span style={{ color: llmStatus.backend === 'ollama' ? 'var(--neon-cyan)' : 'var(--neon-green)' }}>{llmStatus.backend}</span><br />
-                Model: {llmStatus.model}<br />
-                {llmStatus.backend === 'ollama' && <>Ollama: <span style={{ color: llmStatus.ollama_reachable ? 'var(--neon-green)' : 'var(--warm)' }}>{llmStatus.ollama_reachable ? 'reachable' : 'unreachable'}</span><br /></>}
-                Memory: {llmStatus.memory_model}
-              </> : '—'}
-              <div style={{ marginTop: 4, color: 'var(--text-tertiary)', opacity: 0.7 }}>Switch model from the chat input bar ↓</div>
+                {useMemory && <div className="settings-hint" style={{ marginTop: 8 }}>Extracts facts &amp; preferences from conversations, retrieved via embeddings.</div>}
+              </div>
+
+              <div className="settings-card">
+                <div className="settings-card-title">PageIndex · PDF</div>
+                <div className="setting-row"><span>Tree search</span><div className={'toggle ' + (usePageIndex ? 'on' : '')} onClick={() => setUsePageIndex(!usePageIndex)} /></div>
+                {usePageIndex && <>
+                  <div className="settings-hint" style={{ marginTop: 8, marginBottom: 8 }}>Local reasoning-based RAG for PDFs. No external API needed.</div>
+                  <button className="sl-footer-btn" style={{ width: '100%', justifyContent: 'center', marginBottom: 8 }} onClick={() => setShowPiUpload(true)}>
+                    <Upload size={12} /> Upload PDF
+                  </button>
+                  {piDocs.map((d, i) => (
+                    <div key={i} className="file-item" style={{ cursor: 'pointer', background: piActiveDoc === d.doc_id ? 'var(--accent-soft)' : undefined, borderRadius: 'var(--radius-sm)', border: piActiveDoc === d.doc_id ? '1px solid var(--border-neon)' : '1px solid transparent' }}
+                      onClick={() => setPiActiveDoc(piActiveDoc === d.doc_id ? null : d.doc_id)}>
+                      <FileText size={12} style={{ color: piActiveDoc === d.doc_id ? 'var(--neon-cyan)' : 'var(--text-tertiary)' }} />
+                      <span style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.filename}</span>
+                      <span className="file-lang" style={{ background: d.status === 'completed' ? 'rgba(34,245,160,0.1)' : 'rgba(245,158,11,0.1)', color: d.status === 'completed' ? 'var(--neon-green)' : 'var(--warm)' }}>{d.status === 'completed' ? 'ready' : d.status}</span>
+                    </div>
+                  ))}
+                  {!piActiveDoc && piDocs.length > 0 && <div className="settings-hint" style={{ color: 'var(--warm)', marginTop: 6 }}>↑ Select a document to query</div>}
+                </>}
+              </div>
+
+              <div className="settings-card">
+                <div className="settings-card-title">LLM Backend</div>
+                {llmStatus ? (
+                  <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: 'var(--text-tertiary)' }}>Backend</span>
+                      <span style={{ color: llmStatus.backend === 'ollama' ? 'var(--neon-cyan)' : 'var(--neon-green)' }}>{llmStatus.backend}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>Model</span>
+                      <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'right' }}>{llmStatus.model}</span>
+                    </div>
+                    {llmStatus.backend === 'ollama' && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: 'var(--text-tertiary)' }}>Ollama</span>
+                        <span style={{ color: llmStatus.ollama_reachable ? 'var(--neon-green)' : 'var(--warm)' }}>{llmStatus.ollama_reachable ? '● reachable' : '○ unreachable'}</span>
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>Memory</span>
+                      <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'right' }}>{llmStatus.memory_model}</span>
+                    </div>
+                  </div>
+                ) : <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>—</span>}
+                <div className="settings-hint" style={{ marginTop: 8 }}>Switch model from the chat input bar ↓</div>
+              </div>
+
+              <div className="settings-card">
+                <div className="settings-card-title">System</div>
+                <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>Embeddings</span>
+                    <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'right' }}>{stats ? stats.embedding_model : '—'}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-tertiary)' }}>Chunks</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{stats ? stats.document_count : 0}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-tertiary)' }}>BM25 / Vector</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{stats ? stats.bm25_weight : 0.3} / {stats ? stats.vector_weight : 0.7}</span>
+                  </div>
+                </div>
+              </div>
+
             </div>
-            <div className="pr-section-title">System</div>
-            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', lineHeight: 2 }}>
-              Embeddings: {stats ? stats.embedding_model : '—'}<br />
-              Chunks: {stats ? stats.document_count : 0}<br />
-              BM25: {stats ? stats.bm25_weight : 0.3} / Vector: {stats ? stats.vector_weight : 0.7}
-            </div>
-          </>}
+          )}
         </div>
       </aside>
 
