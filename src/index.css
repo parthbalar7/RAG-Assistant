@@ -62,6 +62,7 @@ body { font-family: var(--font-body); background: var(--bg-base); color: var(--t
 @keyframes dotPulse { 0%, 80%, 100% { transform: scale(0.5); opacity: 0.2; } 40% { transform: scale(1.1); opacity: 1; } }
 @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
 @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 @keyframes neonPulse { 0%, 100% { box-shadow: 0 0 5px var(--neon-cyan), 0 0 20px rgba(0,240,255,0.1); } 50% { box-shadow: 0 0 10px var(--neon-cyan), 0 0 40px rgba(0,240,255,0.2); } }
 @keyframes gradientShift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
@@ -185,6 +186,49 @@ body { font-family: var(--font-body); background: var(--bg-base); color: var(--t
 .source-card-page { font-size: 10px; color: var(--neon-purple); font-family: var(--font-mono); }
 .source-card-preview { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; max-height: 0; overflow: hidden; transition: max-height 0.3s ease, opacity 0.3s; opacity: 0; }
 .source-card.expanded .source-card-preview { max-height: 200px; opacity: 1; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+
+/* ── Graph Path Badge ── */
+.gpath-container { margin-top: 6px; }
+.gpath-summary-btn { display: flex; align-items: center; gap: 6px; width: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 10px; cursor: pointer; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); transition: var(--transition); flex-wrap: wrap; }
+.gpath-summary-btn:hover { border-color: rgba(168,85,247,0.4); background: var(--glass); }
+.gpath-seed-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.gpath-chip { padding: 1px 7px; border-radius: 8px; font-size: 9px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
+.gpath-seed { background: rgba(168,85,247,0.15); color: var(--neon-purple); border: 1px solid rgba(168,85,247,0.3); }
+.gpath-node { background: var(--glass); color: var(--text-secondary); border: 1px solid var(--border); }
+.gpath-drawer { margin-top: 4px; border: 1px solid rgba(168,85,247,0.2); border-radius: var(--radius-md); background: var(--bg-surface); overflow: hidden; }
+.gpath-edges { padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; border-bottom: 1px solid var(--border); max-height: 200px; overflow-y: auto; }
+.gpath-edge-row { display: flex; align-items: center; gap: 6px; }
+.gpath-rel-label { font-size: 9px; color: var(--text-tertiary); font-family: var(--font-mono); background: var(--glass); padding: 1px 5px; border-radius: 4px; }
+.gpath-arrow { color: var(--text-tertiary); font-size: 10px; }
+.gpath-hop { font-size: 8px; color: var(--text-tertiary); font-family: var(--font-mono); margin-left: auto; opacity: 0.6; }
+.gpath-nodes-section { padding: 8px 10px; }
+.gpath-section-label { font-size: 9px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.8px; font-family: var(--font-mono); display: block; margin-bottom: 6px; }
+.gpath-nodes-wrap { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* ── Provenance / Ancestry Trace ── */
+.prov-container { margin-top: 8px; }
+.prov-summary-btn { display: flex; align-items: center; gap: 6px; width: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 10px; cursor: pointer; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); transition: var(--transition); }
+.prov-summary-btn:hover { border-color: var(--border-neon); background: var(--glass); }
+.prov-pill { padding: 1px 7px; border-radius: 8px; font-size: 9px; font-family: var(--font-mono); font-weight: 600; }
+.prov-sourced  { background: rgba(0,240,255,0.10); color: var(--neon-cyan); }
+.prov-inferred { background: rgba(245,158,11,0.10); color: #f59e0b; }
+.prov-orphan   { background: rgba(255,80,80,0.10);  color: var(--neon-red, #ff5050); }
+.prov-drawer { margin-top: 4px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-surface); overflow: hidden; }
+.prov-sentences { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; }
+.prov-sent { padding: 7px 10px; border-left: 3px solid transparent; cursor: pointer; transition: background 0.15s; }
+.prov-sent:not(:last-child) { border-bottom: 1px solid var(--border); }
+.prov-sent:hover { background: var(--glass) !important; }
+.prov-sent-header { display: flex; align-items: flex-start; gap: 7px; }
+.prov-sent-text { font-size: 11px; color: var(--text-secondary); line-height: 1.5; flex: 1; }
+.prov-novel-score { font-size: 9px; font-family: var(--font-mono); white-space: nowrap; padding: 1px 5px; border-radius: 6px; background: var(--glass); flex-shrink: 0; align-self: flex-start; }
+.prov-attr-list { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; padding-left: 17px; }
+.prov-attr { display: flex; align-items: flex-start; gap: 6px; font-size: 10px; font-family: var(--font-mono); }
+.prov-attr-type { padding: 0 5px; border-radius: 4px; background: var(--glass); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
+.prov-attr-id   { color: var(--neon-purple); flex-shrink: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-attr-sim  { color: var(--neon-cyan); flex-shrink: 0; }
+.prov-attr-preview { color: var(--text-tertiary); font-size: 9px; line-height: 1.4; flex: 1; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.prov-legend { display: flex; gap: 12px; padding: 6px 10px; border-top: 1px solid var(--border); font-size: 9px; color: var(--text-tertiary); font-family: var(--font-mono); }
+.prov-legend span { display: flex; align-items: center; gap: 4px; }
 
 /* ── Agent Steps ── */
 .agent-steps { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }

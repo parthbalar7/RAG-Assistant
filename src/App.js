@@ -8,7 +8,9 @@ import {
   Send, Menu, FolderOpen, Upload, Trash2, ChevronDown, ChevronRight, FileCode, Copy, Check,
   X, AlertCircle, CheckCircle2, Info, Plus, MessageSquare, Sun, Moon,
   PanelRightOpen, PanelRightClose, BarChart3, FolderTree, Settings, Bot, Route, LogIn, LogOut,
-  Mic, MicOff, Eye, EyeOff, FileText, BookOpen, Sparkles, Brain, Search, PlusCircle
+  Mic, MicOff, Eye, EyeOff, FileText, BookOpen, Sparkles, Brain, Search, PlusCircle,
+  GitBranch, ShieldCheck, ShieldAlert, ShieldOff,
+  Network, RefreshCw, ZoomIn, ZoomOut
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_API_URL || '';
@@ -209,6 +211,143 @@ function SourcesPanel({ sources, onViewPdf }) {
           </div>
         ))}
       </div>}
+    </div>
+  );
+}
+
+/* ── GraphPathBadge ── */
+function GraphPathBadge({ graphPath }) {
+  const [open, setOpen] = useState(false);
+  if (!graphPath) return null;
+
+  const seeds = graphPath.seeds || [];
+  const nodes = graphPath.nodes || [];
+  const edges = graphPath.edges || [];
+  const chunks_found = graphPath.chunks_found || 0;
+  const noSeeds = seeds.length === 0;
+  const seedKeys = new Set(seeds.map(s => s.key));
+
+  return (
+    <div className="gpath-container">
+      <button className="gpath-summary-btn" onClick={() => !noSeeds && setOpen(o => !o)}
+              style={{ cursor: noSeeds ? 'default' : 'pointer' }} title="Graph traversal path">
+        <Network size={10} style={{ color: noSeeds ? 'var(--text-tertiary)' : 'var(--neon-purple)' }} />
+        <span style={{ color: noSeeds ? 'var(--text-tertiary)' : 'var(--neon-purple)', fontSize: 10 }}>Graph path</span>
+        {noSeeds
+          ? <span style={{ fontSize: 9, color: 'var(--text-tertiary)' }}>{graphPath.message || 'No matching entities found'}</span>
+          : <span className="gpath-seed-chips">
+              {seeds.map(s => (
+                <span key={s.key} className="gpath-chip gpath-seed">{s.display}</span>
+              ))}
+            </span>
+        }
+        {!noSeeds && (
+          <span style={{ fontSize: 9, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+            {nodes.length} nodes · {chunks_found} chunks {open ? '▲' : '▼'}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="gpath-drawer">
+          {/* Traversal edge list */}
+          {edges.length > 0 && (
+            <div className="gpath-edges">
+              {edges.slice(0, 15).map((e, i) => (
+                <div key={i} className="gpath-edge-row">
+                  <span className={'gpath-chip ' + (seedKeys.has(e.from?.toLowerCase()) ? 'gpath-seed' : 'gpath-node')}>{e.from}</span>
+                  <span className="gpath-rel-label">{e.rel.replace(/_/g, ' ')}</span>
+                  <span className="gpath-arrow">→</span>
+                  <span className={'gpath-chip ' + (seedKeys.has(e.to?.toLowerCase()) ? 'gpath-seed' : 'gpath-node')}>{e.to}</span>
+                  <span className="gpath-hop">hop {e.hop}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* All visited nodes */}
+          <div className="gpath-nodes-section">
+            <span className="gpath-section-label">Visited entities</span>
+            <div className="gpath-nodes-wrap">
+              {nodes.map(n => (
+                <span key={n.key} className={'gpath-chip ' + (n.is_seed ? 'gpath-seed' : 'gpath-node')} title={n.type + ' · ' + n.degree + ' connections'}>
+                  {n.display}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── ProvenanceBadge ── */
+const RISK_META = {
+  sourced:  { icon: ShieldCheck, color: 'var(--neon-cyan)',   bg: 'rgba(0,240,255,0.08)',   label: 'sourced'  },
+  inferred: { icon: ShieldAlert, color: '#f59e0b',            bg: 'rgba(245,158,11,0.08)',  label: 'inferred' },
+  orphan:   { icon: ShieldOff,   color: 'var(--neon-red)',    bg: 'rgba(255,80,80,0.08)',   label: 'orphan'   },
+};
+
+function ProvenanceBadge({ provenance }) {
+  const [open, setOpen] = useState(false);
+  const [activeSent, setActiveSent] = useState(null);
+  if (!provenance) return null;
+  const { sentences, sourced_count, inferred_count, orphan_count } = provenance;
+  const total = sentences.length;
+  if (total === 0) return null;
+
+  const riskColor = orphan_count / total > 0.4 ? 'var(--neon-red)' : orphan_count / total > 0.15 ? '#f59e0b' : 'var(--neon-cyan)';
+
+  return (
+    <div className="prov-container">
+      <button className="prov-summary-btn" onClick={() => setOpen(o => !o)} title="Ancestry Trace — sentence-level attribution">
+        <GitBranch size={10} style={{ color: riskColor }} />
+        <span className="prov-pill prov-sourced">{sourced_count} sourced</span>
+        {inferred_count > 0 && <span className="prov-pill prov-inferred">{inferred_count} inferred</span>}
+        {orphan_count > 0 && <span className="prov-pill prov-orphan">{orphan_count} orphan</span>}
+        <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text-tertiary)' }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div className="prov-drawer">
+          <div className="prov-sentences">
+            {sentences.map((sp, i) => {
+              const meta = RISK_META[sp.risk] || RISK_META.inferred;
+              const Icon = meta.icon;
+              const isActive = activeSent === i;
+              return (
+                <div key={i} className={'prov-sent ' + (isActive ? 'prov-sent-active' : '')}
+                     style={{ borderLeftColor: meta.color, background: isActive ? meta.bg : 'transparent' }}
+                     onClick={() => setActiveSent(isActive ? null : i)}>
+                  <div className="prov-sent-header">
+                    <Icon size={10} style={{ color: meta.color, flexShrink: 0 }} />
+                    <span className="prov-sent-text">{sp.text.length > 100 ? sp.text.slice(0, 100) + '…' : sp.text}</span>
+                    <span className="prov-novel-score" style={{ color: meta.color }}>{(sp.novel_score * 100).toFixed(0)}% novel</span>
+                  </div>
+                  {isActive && sp.attributions.length > 0 && (
+                    <div className="prov-attr-list">
+                      {sp.attributions.slice(0, 3).map((a, j) => (
+                        <div key={j} className="prov-attr">
+                          <span className="prov-attr-type">{a.source_type}</span>
+                          <span className="prov-attr-id" title={a.source_id}>{a.source_id.length > 30 ? '…' + a.source_id.slice(-28) : a.source_id}</span>
+                          <span className="prov-attr-sim">{(a.similarity * 100).toFixed(0)}%</span>
+                          <span className="prov-attr-preview">{a.source_preview}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div className="prov-legend">
+            <span><ShieldCheck size={9} style={{ color: 'var(--neon-cyan)' }} /> sourced &lt;35% novel</span>
+            <span><ShieldAlert size={9} style={{ color: '#f59e0b' }} /> inferred 35-65%</span>
+            <span><ShieldOff size={9} style={{ color: 'var(--neon-red)' }} /> orphan &gt;65%</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1502,6 +1641,322 @@ function AddMemoryModal({ onClose, onAdd }) {
 }
 
 
+/* ── GraphPanel — Memory Palace ── */
+// Palette: up to 12 distinct document colours
+const GRAPH_COLORS = [
+  '#00f0ff','#a855f7','#f59e0b','#34d399','#f87171',
+  '#60a5fa','#fb923c','#e879f9','#a3e635','#38bdf8',
+  '#f472b6','#4ade80',
+];
+
+function GraphPanel({ token, onToast, isReady }) {
+  const canvasRef = useRef(null);
+  const simRef = useRef({ nodes: [], edges: [], alpha: 0, running: false, raf: null });
+  const viewRef = useRef({ x: 0, y: 0, scale: 1 });
+  const dragRef = useRef(null);
+  const [graphData, setGraphData] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [building, setBuilding] = useState(false);
+  const [selectedNode, setSelectedNode] = useState(null);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const s = await api.get('/api/graph/stats', token);
+      setStats(s);
+    } catch (_) {}
+  }, [token]);
+
+  useEffect(() => { fetchStats(); }, [fetchStats]);
+
+  const handleBuild = async () => {
+    if (!isReady) { onToast('error', 'Index documents first'); return; }
+    setBuilding(true);
+    try {
+      const r = await api.post('/api/graph/build', {}, token);
+      onToast('success', `Graph built: ${r.nodes} nodes, ${r.edges} edges in ${(r.ms/1000).toFixed(1)}s`);
+      fetchStats();
+      handleLoad();
+    } catch (e) { onToast('error', e.message); }
+    finally { setBuilding(false); }
+  };
+
+  const handleLoad = async () => {
+    try {
+      const d = await api.get('/api/graph?max_nodes=200', token);
+      setGraphData(d);
+      setStats(d.stats);
+    } catch (e) { onToast('error', e.message); }
+  };
+
+  // ── Force simulation ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!graphData || !graphData.nodes.length) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const W = canvas.offsetWidth || 400;
+    const H = canvas.offsetHeight || 500;
+    canvas.width = W;
+    canvas.height = H;
+
+    // Init node positions
+    const nodeMap = {};
+    const simNodes = graphData.nodes.map((n, i) => {
+      const angle = (i / graphData.nodes.length) * Math.PI * 2;
+      const r = Math.min(W, H) * 0.35;
+      const node = {
+        ...n,
+        x: W / 2 + Math.cos(angle) * r + (Math.random() - 0.5) * 60,
+        y: H / 2 + Math.sin(angle) * r + (Math.random() - 0.5) * 60,
+        vx: 0, vy: 0,
+        radius: Math.max(4, Math.min(12, 4 + n.degree)),
+      };
+      nodeMap[n.id] = node;
+      return node;
+    });
+    const simEdges = graphData.edges.map(e => ({
+      source: nodeMap[e.source],
+      target: nodeMap[e.target],
+      weight: e.weight,
+    })).filter(e => e.source && e.target);
+
+    const sim = simRef.current;
+    sim.nodes = simNodes;
+    sim.edges = simEdges;
+    sim.alpha = 1.0;
+    sim.nodeMap = nodeMap;
+
+    if (sim.raf) cancelAnimationFrame(sim.raf);
+
+    const ctx = canvas.getContext('2d');
+
+    const tick = () => {
+      const { x: ox, y: oy, scale } = viewRef.current;
+      sim.alpha *= 0.98;
+      if (sim.alpha < 0.003) sim.alpha = 0;
+
+      if (sim.alpha > 0) {
+        const a = sim.alpha;
+        const cx = W / 2, cy = H / 2;
+
+        // Repulsion
+        for (let i = 0; i < simNodes.length; i++) {
+          for (let j = i + 1; j < simNodes.length; j++) {
+            const ni = simNodes[i], nj = simNodes[j];
+            const dx = nj.x - ni.x, dy = nj.y - ni.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+            const force = (1200 / (dist * dist)) * a;
+            const fx = (dx / dist) * force, fy = (dy / dist) * force;
+            ni.vx -= fx; ni.vy -= fy;
+            nj.vx += fx; nj.vy += fy;
+          }
+          // Gravity to center
+          simNodes[i].vx += (cx - simNodes[i].x) * 0.01 * a;
+          simNodes[i].vy += (cy - simNodes[i].y) * 0.01 * a;
+        }
+
+        // Spring attraction (edges)
+        for (const e of simEdges) {
+          const dx = e.target.x - e.source.x, dy = e.target.y - e.source.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+          const ideal = 80 + e.weight * 8;
+          const force = (dist - ideal) * 0.04 * a;
+          const fx = (dx / dist) * force, fy = (dy / dist) * force;
+          e.source.vx += fx; e.source.vy += fy;
+          e.target.vx -= fx; e.target.vy -= fy;
+        }
+
+        // Integrate + dampen
+        for (const n of simNodes) {
+          n.vx *= 0.85; n.vy *= 0.85;
+          n.x += n.vx; n.y += n.vy;
+          n.x = Math.max(20, Math.min(W - 20, n.x));
+          n.y = Math.max(20, Math.min(H - 20, n.y));
+        }
+      }
+
+      // Draw
+      ctx.clearRect(0, 0, W, H);
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.scale(scale, scale);
+
+      // Edges
+      ctx.lineWidth = 0.8;
+      for (const e of simEdges) {
+        const alpha = Math.min(1, 0.2 + e.weight * 0.1);
+        ctx.strokeStyle = `rgba(120,120,140,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(e.source.x, e.source.y);
+        ctx.lineTo(e.target.x, e.target.y);
+        ctx.stroke();
+      }
+
+      // Nodes
+      for (const n of simNodes) {
+        const color = GRAPH_COLORS[n.color_idx % GRAPH_COLORS.length];
+        const isSelected = selectedNode && selectedNode.id === n.id;
+
+        // Glow for selected
+        if (isSelected) {
+          ctx.shadowColor = color;
+          ctx.shadowBlur = 12;
+        }
+
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+        ctx.fillStyle = color + (isSelected ? 'ff' : '99');
+        ctx.fill();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isSelected ? 2 : 0.5;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        // Label only for high-degree nodes or selected
+        if (n.degree >= 3 || isSelected) {
+          ctx.font = `${isSelected ? 'bold ' : ''}${Math.max(9, Math.min(11, 8 + n.degree * 0.5))}px monospace`;
+          ctx.fillStyle = isSelected ? color : 'rgba(200,200,220,0.85)';
+          ctx.fillText(n.label.slice(0, 20), n.x + n.radius + 3, n.y + 4);
+        }
+      }
+
+      ctx.restore();
+      sim.raf = requestAnimationFrame(tick);
+    };
+
+    sim.raf = requestAnimationFrame(tick);
+    return () => { if (sim.raf) cancelAnimationFrame(sim.raf); };
+  }, [graphData]);  // eslint-disable-line
+
+  // ── Mouse interactions ─────────────────────────────────────────────────────
+  const getCanvasPos = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const { x: ox, y: oy, scale } = viewRef.current;
+    return {
+      x: (e.clientX - rect.left - ox) / scale,
+      y: (e.clientY - rect.top - oy) / scale,
+    };
+  };
+
+  const onMouseDown = (e) => {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, ox: viewRef.current.x, oy: viewRef.current.y, moved: false };
+  };
+
+  const onMouseMove = (e) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.moved = true;
+    viewRef.current.x = dragRef.current.ox + dx;
+    viewRef.current.y = dragRef.current.oy + dy;
+  };
+
+  const onMouseUp = (e) => {
+    if (!dragRef.current) return;
+    if (!dragRef.current.moved && simRef.current.nodeMap) {
+      const { x, y } = getCanvasPos(e);
+      let hit = null;
+      for (const n of simRef.current.nodes) {
+        if (Math.hypot(n.x - x, n.y - y) < n.radius + 6) { hit = n; break; }
+      }
+      setSelectedNode(hit);
+    }
+    dragRef.current = null;
+  };
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    viewRef.current.scale = Math.max(0.2, Math.min(4, viewRef.current.scale * factor));
+  };
+
+  const resetView = () => { viewRef.current = { x: 0, y: 0, scale: 1 }; };
+
+  return (
+    <div className="panel-content" style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Network size={13} style={{ color: 'var(--neon-cyan)' }} />
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>Knowledge Graph</span>
+        {stats && stats.built_at && (
+          <span style={{ fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', marginLeft: 'auto' }}>
+            {stats.nodes}N · {stats.edges}E
+          </span>
+        )}
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button className="sl-footer-btn" style={{ flex: 1, justifyContent: 'center', color: building ? 'var(--text-tertiary)' : 'var(--neon-cyan)', borderColor: 'var(--border-neon)' }}
+          onClick={handleBuild} disabled={building}>
+          <RefreshCw size={11} style={{ animation: building ? 'spin 1s linear infinite' : 'none' }} />
+          {building ? 'Building…' : stats && stats.nodes > 0 ? 'Rebuild' : 'Build Graph'}
+        </button>
+        {stats && stats.nodes > 0 && !graphData && (
+          <button className="sl-footer-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={handleLoad}>
+            <Network size={11} /> View
+          </button>
+        )}
+        {graphData && (
+          <button className="sl-footer-btn" onClick={resetView} title="Reset view">
+            <ZoomIn size={11} />
+          </button>
+        )}
+      </div>
+
+      {/* Stats bar */}
+      {stats && stats.nodes > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {[['Entities', stats.nodes], ['Relations', stats.edges], ['Documents', stats.documents]].map(([label, val]) => (
+            <div key={label} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px 10px', fontSize: 10, fontFamily: 'var(--font-mono)' }}>
+              <span style={{ color: 'var(--text-tertiary)' }}>{label} </span>
+              <span style={{ color: 'var(--neon-cyan)' }}>{val}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Canvas */}
+      {graphData && graphData.nodes.length > 0 ? (
+        <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+          <canvas
+            ref={canvasRef}
+            style={{ width: '100%', height: '100%', cursor: 'grab', display: 'block', background: 'var(--bg-raised)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}
+            onMouseDown={onMouseDown}
+            onMouseMove={onMouseMove}
+            onMouseUp={onMouseUp}
+            onWheel={onWheel}
+          />
+          {/* Selected node detail */}
+          {selectedNode && (
+            <div style={{ position: 'absolute', bottom: 8, left: 8, right: 8, background: 'var(--bg-surface)', border: `1px solid ${GRAPH_COLORS[selectedNode.color_idx % GRAPH_COLORS.length]}44`, borderRadius: 'var(--radius-md)', padding: '8px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: GRAPH_COLORS[selectedNode.color_idx % GRAPH_COLORS.length], flexShrink: 0 }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{selectedNode.label}</span>
+                <span style={{ fontSize: 9, color: 'var(--text-tertiary)', marginLeft: 'auto', background: 'var(--glass)', padding: '1px 6px', borderRadius: 6 }}>{selectedNode.type}</span>
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                {selectedNode.degree} connections · {selectedNode.chunk_count} chunk{selectedNode.chunk_count !== 1 ? 's' : ''}
+              </div>
+              {selectedNode.doc && (
+                <div style={{ fontSize: 9, color: 'var(--text-tertiary)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {selectedNode.doc}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-tertiary)', fontSize: 12, textAlign: 'center' }}>
+          <Network size={32} style={{ opacity: 0.2 }} />
+          <div>Click <strong>Build Graph</strong> to extract entities</div>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>Uses LLM to map concepts, functions,<br/>and relationships across your documents</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [theme, setTheme] = useState(() => { try { return localStorage.getItem('rag-theme') || 'dark'; } catch { return 'dark'; } });
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); try { localStorage.setItem('rag-theme', theme); } catch {} }, [theme]);
@@ -1546,6 +2001,7 @@ export default function App() {
   const [useAgent, setUseAgent] = useState(false);
   const [usePageIndex, setUsePageIndex] = useState(false);
   const [useMemory, setUseMemory] = useState(true);
+  const [useGraph, setUseGraph] = useState(false);
 
   // LLM backend
   const [llmStatus, setLlmStatus] = useState(null);       // {backend, model, ollama_reachable, ...}
@@ -1637,11 +2093,11 @@ export default function App() {
       try { const s = await api.post('/api/sessions', {}, token); setSessions(p => [s, ...p]); sid = s.id; setActiveSession(s.id); } catch (e) { /* ok */ }
     }
     setMessages(p => [...p, { role: 'user', content: q }]);
-    const opts = { use_reranking: useReranking, use_hybrid: useHybrid, use_routing: useRouting, use_agent: useAgent, use_pageindex: !!(usePageIndex && piActiveDoc), pageindex_doc_id: piActiveDoc || null, use_memory: useMemory };
+    const opts = { use_reranking: useReranking, use_hybrid: useHybrid, use_routing: useRouting, use_agent: useAgent, use_pageindex: !!(usePageIndex && piActiveDoc), pageindex_doc_id: piActiveDoc || null, use_memory: useMemory, use_graph: useGraph };
 
     if (useStreaming) {
       setStreaming(true);
-      let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0 };
+      let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0, provenance: null, graphPath: null };
       setMessages(p => [...p, msg]);
       const isFirstMsg = messages.length === 0;
       try {
@@ -1649,6 +2105,8 @@ export default function App() {
           if (ev.type === 'sources') msg = { ...msg, sources: ev.sources };
           else if (ev.type === 'route') msg = { ...msg, route: ev.route };
           else if (ev.type === 'memories') msg = { ...msg, memoriesUsed: ev.count };
+          else if (ev.type === 'provenance') msg = { ...msg, provenance: ev.map };
+          else if (ev.type === 'graph_path') msg = { ...msg, graphPath: ev.traversal };
           else if (ev.type === 'token') msg = { ...msg, content: msg.content + ev.token };
           else if (ev.type === 'session_renamed') {
             setSessions(p => p.map(s => s.id === sid ? { ...s, title: ev.title } : s));
@@ -1775,6 +2233,8 @@ export default function App() {
                     {Array.from({ length: msg.route.steps }, (_, j) => <span key={j} className="agent-step"><span className="step-icon" /> step {j + 1}</span>)}
                   </div>}
                   <SourcesPanel sources={msg.sources} onViewPdf={setPdfSource} />
+                  <GraphPathBadge graphPath={msg.graphPath} />
+                  <ProvenanceBadge provenance={msg.provenance} />
                 </div>
               )}
             </div>
@@ -1824,6 +2284,7 @@ export default function App() {
           <button className={'pr-tab ' + (rightTab === 'radar' ? 'active' : '')} onClick={() => setRightTab('radar')} title="Knowledge Radar"><Sparkles size={15} /></button>
           <button className={'pr-tab ' + (rightTab === 'eval' ? 'active' : '')} onClick={() => setRightTab('eval')} title="Evaluation"><Search size={15} /></button>
           <button className={'pr-tab ' + (rightTab === 'compliance' ? 'active' : '')} onClick={() => setRightTab('compliance')} title="Compliance"><AlertCircle size={15} /></button>
+          <button className={'pr-tab ' + (rightTab === 'graph' ? 'active' : '')} onClick={() => setRightTab('graph')} title="Knowledge Graph"><Network size={15} /></button>
           <button className={'pr-tab ' + (rightTab === 'settings' ? 'active' : '')} onClick={() => setRightTab('settings')} title="Settings"><Settings size={15} /></button>
         </div>
         <div className="pr-content">
@@ -1833,6 +2294,7 @@ export default function App() {
           {rightTab === 'eval' && <EvalPanel token={token} onToast={addToast} isReady={isReady} />}
           {rightTab === 'radar' && <IntegrityRadarPanel token={token} addToast={addToast} isReady={isReady} />}
           {rightTab === 'compliance' && <CompliancePanel token={token} onToast={addToast} isReady={isReady} />}
+          {rightTab === 'graph' && <GraphPanel token={token} onToast={addToast} isReady={isReady} />}
           {rightTab === 'settings' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
 
@@ -1856,6 +2318,11 @@ export default function App() {
                   <div className={'toggle ' + (useMemory ? 'on' : '')} onClick={() => setUseMemory(!useMemory)} />
                 </div>
                 {useMemory && <div className="settings-hint" style={{ marginTop: 8 }}>Extracts facts &amp; preferences from conversations, retrieved via embeddings.</div>}
+                <div className="setting-row" style={{ marginTop: 8 }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><Network size={12} /> Graph traversal</span>
+                  <div className={'toggle ' + (useGraph ? 'on' : '')} onClick={() => setUseGraph(!useGraph)} />
+                </div>
+                {useGraph && <div className="settings-hint" style={{ marginTop: 6 }}>Augments vector search with graph pathfinding. Build the graph first in the Graph tab.</div>}
               </div>
 
               <div className="settings-card">

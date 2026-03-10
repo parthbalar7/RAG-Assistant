@@ -31,6 +31,8 @@ from core.memory import (
     process_session_summary, MemoryFragment, optimize_context_chunks,
     consolidate_memories,
 )
+from core.provenance import compute_provenance
+from core.knowledge_graph import get_user_graph, save_user_graph
 from api import database as db
 from api.auth import hash_password, verify_password, create_token, get_current_user, require_auth, decode_token
 
@@ -376,6 +378,7 @@ async def ws_query_endpoint(websocket: WebSocket):
             use_hybrid = qd.get("use_hybrid", True)
             use_routing = qd.get("use_routing", True)
             use_memory = qd.get("use_memory", True)
+            use_graph  = qd.get("use_graph", False)
             top_k_req = qd.get("top_k")
             is_first = not conv_history
 
@@ -417,6 +420,25 @@ async def ws_query_endpoint(websocket: WebSocket):
                         retrieve, store=s, query=query_text, top_k=top_k,
                         use_reranking=use_reranking, use_hybrid=use_hybrid
                     )
+
+                    # Graph-walk augmentation
+                    graph_traversal = None
+                    if use_graph:
+                        try:
+                            kg = get_user_graph(uid)
+                            if kg.graph.number_of_nodes() > 0:
+                                graph_hits, graph_traversal = await asyncio.to_thread(
+                                    kg.graph_retrieve, query_text, s, top_k
+                                )
+                                # Merge, deduplicate by chunk id
+                                existing_ids = {h.get("id") for h in hits}
+                                for gh in graph_hits:
+                                    if gh.get("id") not in existing_ids:
+                                        hits.append(gh)
+                                        existing_ids.add(gh["id"])
+                        except Exception as ge:
+                            logger.warning("Graph retrieval failed: {}".format(ge))
+
                     sources = [{"file": h["metadata"].get("document_path", ""),
                                 "lines": f"{h['metadata'].get('start_line','?')}-{h['metadata'].get('end_line','?')}",
                                 "language": h["metadata"].get("language", ""),
@@ -439,6 +461,8 @@ async def ws_query_endpoint(websocket: WebSocket):
                         await websocket.send_json({"type": "route", "route": {"category": route.category, "strategy": route.retrieval_strategy}})
                     if memory_ctx and memory_ctx.count > 0:
                         await websocket.send_json({"type": "memories", "count": memory_ctx.count})
+                    if graph_traversal is not None:
+                        await websocket.send_json({"type": "graph_path", "traversal": graph_traversal})
 
                     # Stream tokens via thread + queue bridge with cancel support
                     token_queue: stdlib_queue.Queue = stdlib_queue.Queue()
@@ -489,6 +513,19 @@ async def ws_query_endpoint(websocket: WebSocket):
                             await asyncio.to_thread(process_turn_memories, uid, query_text, full_answer, session_id or "")
                         except Exception as me:
                             logger.warning("Memory extraction failed: {}".format(me))
+
+                    # Ancestry trace — post-hoc sentence attribution
+                    if hits and full_answer:
+                        try:
+                            def _prov():
+                                mem_frags = memory_ctx.fragments if memory_ctx else []
+                                hist_dicts = [{"role": m.role, "content": m.content} for m in (hist or [])]
+                                return compute_provenance(full_answer, hits, mem_frags, query_text, hist_dicts)
+                            prov = await asyncio.to_thread(_prov)
+                            if prov:
+                                await websocket.send_json({"type": "provenance", "map": prov.to_dict()})
+                        except Exception as pe:
+                            logger.warning("Provenance computation failed: {}".format(pe))
 
                 await websocket.send_json({"type": "done"})
 
@@ -643,6 +680,35 @@ async def compliance_scan(req: ComplianceScanReq, user=Depends(require_auth)):
 @app.get("/api/compliance/history")
 async def compliance_history(user=Depends(require_auth)):
     return {"scans": db.get_compliance_history(user["id"])}
+
+
+# ── Knowledge Graph Endpoints ──
+
+@app.post("/api/graph/build")
+async def graph_build(user=Depends(require_auth)):
+    uid = user["id"]
+    store = get_user_store(uid)
+    graph = get_user_graph(uid)
+    # Rebuild from scratch
+    from core.knowledge_graph import KnowledgeGraph
+    graph.__init__()
+    result = await asyncio.to_thread(graph.build_from_store, store)
+    await asyncio.to_thread(save_user_graph, uid)
+    return result
+
+
+@app.get("/api/graph")
+async def graph_data(max_nodes: int = 200, user=Depends(require_auth)):
+    uid = user["id"]
+    graph = get_user_graph(uid)
+    return graph.get_viz_data(max_nodes=max_nodes)
+
+
+@app.get("/api/graph/stats")
+async def graph_stats(user=Depends(require_auth)):
+    uid = user["id"]
+    graph = get_user_graph(uid)
+    return graph.get_stats()
 
 
 # ── LLM Backend Endpoints ──
