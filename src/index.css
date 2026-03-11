@@ -205,6 +205,19 @@ body { font-family: var(--font-body); background: var(--bg-base); color: var(--t
 .gpath-section-label { font-size: 9px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.8px; font-family: var(--font-mono); display: block; margin-bottom: 6px; }
 .gpath-nodes-wrap { display: flex; flex-wrap: wrap; gap: 4px; }
 
+/* ── Gap Prompt ── */
+.gap-prompt { margin-top: 8px; background: rgba(0,240,255,0.04); border: 1px solid rgba(0,240,255,0.2); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; flex-direction: column; gap: 7px; font-size: 10px; }
+.gap-prompt-body { display: flex; align-items: flex-start; gap: 7px; color: var(--text-secondary); line-height: 1.5; }
+.gap-prompt-body strong { color: var(--text-primary); }
+.gap-prompt-body em { color: var(--neon-cyan); font-style: normal; }
+.gap-prompt-actions { display: flex; gap: 6px; }
+.gap-btn { padding: 3px 12px; border-radius: 6px; font-size: 10px; font-family: var(--font-mono); cursor: pointer; border: 1px solid; transition: var(--transition); }
+.gap-btn-yes { background: rgba(0,240,255,0.1); border-color: rgba(0,240,255,0.4); color: var(--neon-cyan); }
+.gap-btn-yes:hover { background: rgba(0,240,255,0.2); }
+.gap-btn-no { background: transparent; border-color: var(--border); color: var(--text-tertiary); }
+.gap-btn-no:hover { color: var(--text-secondary); border-color: var(--text-tertiary); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ── Provenance / Ancestry Trace ── */
 .prov-container { margin-top: 8px; }
 .prov-summary-btn { display: flex; align-items: center; gap: 6px; width: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 10px; cursor: pointer; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); transition: var(--transition); }

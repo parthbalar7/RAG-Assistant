@@ -318,6 +318,79 @@ function GraphPathBadge({ graphPath }) {
   );
 }
 
+/* ── GapPrompt ── */
+function GapPrompt({ gap, query, token, onIngested }) {
+  const [state, setState] = useState('idle'); // idle | searching | done | dismissed | error
+  const [result, setResult] = useState(null);
+
+  if (!gap || state === 'dismissed') return null;
+
+  const approve = () => {
+    setState('searching');
+    const ws = new WebSocket(WS_URL);
+    ws.onopen = () => ws.send(JSON.stringify({
+      type: 'web_search_approved',
+      token,
+      topic: gap.topic,
+      query,
+    }));
+    ws.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (ev.type === 'web_search_started') setState('searching');
+        else if (ev.type === 'web_ingested') {
+          setResult(ev);
+          setState(ev.error && ev.chunks_added === 0 ? 'error' : 'done');
+          if (ev.chunks_added > 0 && onIngested) onIngested(ev);
+          ws.close();
+        }
+      } catch {}
+    };
+    ws.onerror = () => { setState('error'); setResult({ error: 'Connection failed' }); };
+  };
+
+  return (
+    <div className="gap-prompt">
+      {state === 'idle' && (
+        <>
+          <div className="gap-prompt-body">
+            <Search size={11} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+            <span>
+              <strong>Limited coverage</strong> — {gap.reason}
+              {' '}Search the web for <em>"{gap.topic}"</em> and add it to your index?
+            </span>
+          </div>
+          <div className="gap-prompt-actions">
+            <button className="gap-btn gap-btn-yes" onClick={approve}>Search web</button>
+            <button className="gap-btn gap-btn-no" onClick={() => setState('dismissed')}>Dismiss</button>
+          </div>
+        </>
+      )}
+      {state === 'searching' && (
+        <div className="gap-prompt-body">
+          <RefreshCw size={11} style={{ color: 'var(--neon-cyan)', animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+          <span>Searching the web for <em>"{gap.topic}"</em>…</span>
+        </div>
+      )}
+      {state === 'done' && result && (
+        <div className="gap-prompt-body">
+          <CheckCircle2 size={11} style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+          <span>
+            Added <strong>{result.chunks_added} chunks</strong> from {result.urls?.length || 0} source(s).
+            Ask your question again for better results.
+          </span>
+        </div>
+      )}
+      {state === 'error' && (
+        <div className="gap-prompt-body">
+          <AlertCircle size={11} style={{ color: 'var(--neon-red, #ff4d4d)', flexShrink: 0 }} />
+          <span>{result?.error || 'Web search failed.'}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── ProvenanceBadge ── */
 const RISK_META = {
   sourced:  { icon: ShieldCheck, color: 'var(--neon-cyan)',   bg: 'rgba(0,240,255,0.08)',   label: 'sourced'  },
@@ -2220,7 +2293,7 @@ export default function App() {
 
     if (useStreaming) {
       setStreaming(true);
-      let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0, provenance: null, graphPath: null, subQueries: null };
+      let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0, provenance: null, graphPath: null, subQueries: null, gap: null, query: q };
       setMessages(p => [...p, msg]);
       const isFirstMsg = messages.length === 0;
       try {
@@ -2231,6 +2304,7 @@ export default function App() {
           else if (ev.type === 'provenance') msg = { ...msg, provenance: ev.map };
           else if (ev.type === 'graph_path') msg = { ...msg, graphPath: ev.traversal };
           else if (ev.type === 'decomposed') msg = { ...msg, subQueries: ev.sub_queries };
+          else if (ev.type === 'gap_detected') msg = { ...msg, gap: { topic: ev.topic, reason: ev.reason, top_score: ev.top_score } };
           else if (ev.type === 'token') msg = { ...msg, content: msg.content + ev.token };
           else if (ev.type === 'session_renamed') {
             setSessions(p => p.map(s => s.id === sid ? { ...s, title: ev.title } : s));
@@ -2360,6 +2434,7 @@ export default function App() {
                   <DecomposedBadge subQueries={msg.subQueries} />
                   <GraphPathBadge graphPath={msg.graphPath} />
                   <ProvenanceBadge provenance={msg.provenance} />
+                  <GapPrompt gap={msg.gap} query={msg.query || ''} token={token} onIngested={() => addToast('success', 'Web content ingested — ask again for better results!')} />
                 </div>
               )}
             </div>

@@ -35,6 +35,8 @@ from core.provenance import compute_provenance
 from core.knowledge_graph import get_user_graph, save_user_graph
 from core.query_cache import get_user_cache, invalidate_user_cache
 from core.decomposer import is_multi_part, decompose, merge_hits
+from core.gap_analyzer import analyze as analyze_gap
+from core.web_augmenter import augment as web_augment
 from api import database as db
 from api.auth import hash_password, verify_password, create_token, get_current_user, require_auth, decode_token
 
@@ -372,6 +374,28 @@ async def ws_query_endpoint(websocket: WebSocket):
                 continue
 
             uid = user["id"]
+
+            # ── Web search approval (gap-driven research) ────────────────────
+            if raw.get("type") == "web_search_approved":
+                topic   = raw.get("topic", "")
+                query   = raw.get("query", topic)
+                store   = get_user_store(uid)
+                await websocket.send_json({"type": "web_search_started", "topic": topic})
+                try:
+                    result = await asyncio.to_thread(web_augment, topic, store, query)
+                    invalidate_user_cache(uid)
+                    await websocket.send_json({
+                        "type": "web_ingested",
+                        "topic": result.topic,
+                        "chunks_added": result.chunks_added,
+                        "urls": result.urls_fetched,
+                        "failed": result.urls_failed,
+                        "error": result.error,
+                    })
+                except Exception as we:
+                    await websocket.send_json({"type": "web_ingested", "error": str(we), "chunks_added": 0, "urls": []})
+                continue
+
             qd = raw.get("query_data", {})
             query_text = qd.get("query", "")
             session_id = qd.get("session_id")
@@ -594,6 +618,19 @@ async def ws_query_endpoint(websocket: WebSocket):
                                 await websocket.send_json({"type": "provenance", "map": prov.to_dict()})
                         except Exception as pe:
                             logger.warning("Provenance computation failed: {}".format(pe))
+
+                    # Gap analysis — prompt user to search web if coverage is weak
+                    try:
+                        gap = analyze_gap(query_text, hits, full_answer)
+                        if gap.is_gap:
+                            await websocket.send_json({
+                                "type": "gap_detected",
+                                "topic": gap.topic,
+                                "reason": gap.reason,
+                                "top_score": round(gap.top_score, 3),
+                            })
+                    except Exception as ge:
+                        logger.warning("Gap analysis failed: {}".format(ge))
 
                 await websocket.send_json({"type": "done"})
 
