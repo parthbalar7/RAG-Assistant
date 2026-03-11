@@ -39,9 +39,30 @@ def get_reranker():
 
 
 def embed_texts(texts):
+    from core.embed_cache import get_embed_cache
+    cache = get_embed_cache()
     model = get_embedding_model()
-    embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
-    return embeddings.tolist()
+
+    result: list = [None] * len(texts)
+    uncached_indices: list[int] = []
+    uncached_texts: list[str] = []
+
+    for i, text in enumerate(texts):
+        cached = cache.get(text)
+        if cached is not None:
+            result[i] = cached.tolist()
+        else:
+            uncached_indices.append(i)
+            uncached_texts.append(text)
+
+    if uncached_texts:
+        new_vecs = model.encode(uncached_texts, show_progress_bar=False, normalize_embeddings=True)
+        cache.put_batch(uncached_texts, new_vecs)
+        cache.save()
+        for list_pos, original_idx in enumerate(uncached_indices):
+            result[original_idx] = new_vecs[list_pos].tolist()
+
+    return result
 
 
 # ── BM25 Index ──

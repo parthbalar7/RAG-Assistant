@@ -10,7 +10,7 @@ import {
   PanelRightOpen, PanelRightClose, BarChart3, FolderTree, Settings, Bot, Route, LogIn, LogOut,
   Mic, MicOff, Eye, EyeOff, FileText, BookOpen, Sparkles, Brain, Search, PlusCircle,
   GitBranch, ShieldCheck, ShieldAlert, ShieldOff,
-  Network, RefreshCw, ZoomIn, ZoomOut
+  Network, RefreshCw, ZoomIn, ZoomOut, Layers
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_API_URL || '';
@@ -211,6 +211,42 @@ function SourcesPanel({ sources, onViewPdf }) {
           </div>
         ))}
       </div>}
+    </div>
+  );
+}
+
+/* ── DecomposedBadge ── */
+function DecomposedBadge({ subQueries }) {
+  const [open, setOpen] = useState(false);
+  if (!subQueries || subQueries.length === 0) return null;
+  return (
+    <div className="gpath-container">
+      <button className="gpath-summary-btn" onClick={() => setOpen(o => !o)}
+              title="Query was decomposed into sub-queries">
+        <Layers size={10} style={{ color: 'var(--neon-cyan)' }} />
+        <span style={{ color: 'var(--neon-cyan)', fontSize: 10 }}>Decomposed</span>
+        <span className="gpath-seed-chips">
+          {subQueries.map((_sq, i) => (
+            <span key={i} className="gpath-chip gpath-seed">{i + 1}</span>
+          ))}
+        </span>
+        <span style={{ fontSize: 9, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+          {subQueries.length} sub-queries {open ? '▲' : '▼'}
+        </span>
+      </button>
+      {open && (
+        <div className="gpath-drawer">
+          <div className="gpath-nodes-section">
+            <span className="gpath-section-label">Sub-queries retrieved independently</span>
+            {subQueries.map((sq, i) => (
+              <div key={i} className="gpath-edge-row" style={{ alignItems: 'flex-start', gap: 6 }}>
+                <span className="gpath-chip gpath-seed" style={{ minWidth: 18, textAlign: 'center' }}>{i + 1}</span>
+                <span style={{ fontSize: 10, color: 'var(--text-secondary)', lineHeight: 1.4 }}>{sq}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1642,7 +1678,6 @@ function AddMemoryModal({ onClose, onAdd }) {
 
 
 /* ── GraphPanel — Memory Palace ── */
-// Palette: up to 12 distinct document colours
 const GRAPH_COLORS = [
   '#00f0ff','#a855f7','#f59e0b','#34d399','#f87171',
   '#60a5fa','#fb923c','#e879f9','#a3e635','#38bdf8',
@@ -1651,19 +1686,18 @@ const GRAPH_COLORS = [
 
 function GraphPanel({ token, onToast, isReady }) {
   const canvasRef = useRef(null);
-  const simRef = useRef({ nodes: [], edges: [], alpha: 0, running: false, raf: null });
+  const simRef = useRef({ nodes: [], edges: [], alpha: 0, raf: null, nodeMap: {} });
   const viewRef = useRef({ x: 0, y: 0, scale: 1 });
   const dragRef = useRef(null);
+  const hoveredRef = useRef(null);   // tracks hovered node without re-render
   const [graphData, setGraphData] = useState(null);
   const [stats, setStats] = useState(null);
   const [building, setBuilding] = useState(false);
   const [selectedNode, setSelectedNode] = useState(null);
+  const [docLegend, setDocLegend] = useState([]);
 
   const fetchStats = useCallback(async () => {
-    try {
-      const s = await api.get('/api/graph/stats', token);
-      setStats(s);
-    } catch (_) {}
+    try { const s = await api.get('/api/graph/stats', token); setStats(s); } catch (_) {}
   }, [token]);
 
   useEffect(() => { fetchStats(); }, [fetchStats]);
@@ -1674,8 +1708,7 @@ function GraphPanel({ token, onToast, isReady }) {
     try {
       const r = await api.post('/api/graph/build', {}, token);
       onToast('success', `Graph built: ${r.nodes} nodes, ${r.edges} edges in ${(r.ms/1000).toFixed(1)}s`);
-      fetchStats();
-      handleLoad();
+      fetchStats(); handleLoad();
     } catch (e) { onToast('error', e.message); }
     finally { setBuilding(false); }
   };
@@ -1683,8 +1716,7 @@ function GraphPanel({ token, onToast, isReady }) {
   const handleLoad = async () => {
     try {
       const d = await api.get('/api/graph?max_nodes=200', token);
-      setGraphData(d);
-      setStats(d.stats);
+      setGraphData(d); setStats(d.stats);
     } catch (e) { onToast('error', e.message); }
   };
 
@@ -1694,129 +1726,215 @@ function GraphPanel({ token, onToast, isReady }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const W = canvas.offsetWidth || 400;
-    const H = canvas.offsetHeight || 500;
+    // Size canvas to its CSS-rendered dimensions
+    const rect = canvas.getBoundingClientRect();
+    const W = rect.width || 400;
+    const H = rect.height || 500;
     canvas.width = W;
     canvas.height = H;
 
-    // Init node positions
+    // Build document → color legend
+    const docMap = {};
+    graphData.nodes.forEach(n => {
+      if (n.doc && !(n.doc in docMap)) docMap[n.doc] = n.color_idx;
+    });
+    setDocLegend(Object.entries(docMap).map(([doc, idx]) => ({
+      label: doc.split(/[\\/]/).pop(),   // just filename
+      color: GRAPH_COLORS[idx % GRAPH_COLORS.length],
+    })));
+
+    const MARGIN = 60;
     const nodeMap = {};
     const simNodes = graphData.nodes.map((n, i) => {
-      const angle = (i / graphData.nodes.length) * Math.PI * 2;
-      const r = Math.min(W, H) * 0.35;
+      // Grid-based start positions — avoids circular corner clustering
+      const cols = Math.ceil(Math.sqrt(graphData.nodes.length * (W / H)));
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const cellW = (W - MARGIN * 2) / cols;
+      const cellH = (H - MARGIN * 2) / Math.ceil(graphData.nodes.length / cols);
       const node = {
         ...n,
-        x: W / 2 + Math.cos(angle) * r + (Math.random() - 0.5) * 60,
-        y: H / 2 + Math.sin(angle) * r + (Math.random() - 0.5) * 60,
+        x: MARGIN + col * cellW + cellW / 2 + (Math.random() - 0.5) * cellW * 0.5,
+        y: MARGIN + row * cellH + cellH / 2 + (Math.random() - 0.5) * cellH * 0.5,
         vx: 0, vy: 0,
-        radius: Math.max(4, Math.min(12, 4 + n.degree)),
+        radius: Math.max(5, Math.min(14, 5 + n.degree * 1.2)),
       };
       nodeMap[n.id] = node;
       return node;
     });
+
     const simEdges = graphData.edges.map(e => ({
+      ...e,
       source: nodeMap[e.source],
       target: nodeMap[e.target],
-      weight: e.weight,
     })).filter(e => e.source && e.target);
 
     const sim = simRef.current;
-    sim.nodes = simNodes;
-    sim.edges = simEdges;
-    sim.alpha = 1.0;
-    sim.nodeMap = nodeMap;
-
+    sim.nodes = simNodes; sim.edges = simEdges;
+    sim.alpha = 1.0; sim.nodeMap = nodeMap;
     if (sim.raf) cancelAnimationFrame(sim.raf);
 
     const ctx = canvas.getContext('2d');
+    const IDEAL_DIST = 90;
 
     const tick = () => {
-      const { x: ox, y: oy, scale } = viewRef.current;
-      sim.alpha *= 0.98;
-      if (sim.alpha < 0.003) sim.alpha = 0;
+      sim.alpha *= 0.975;
+      if (sim.alpha < 0.002) sim.alpha = 0;
 
       if (sim.alpha > 0) {
         const a = sim.alpha;
         const cx = W / 2, cy = H / 2;
 
-        // Repulsion
         for (let i = 0; i < simNodes.length; i++) {
+          const ni = simNodes[i];
+
+          // Node-node repulsion
           for (let j = i + 1; j < simNodes.length; j++) {
-            const ni = simNodes[i], nj = simNodes[j];
+            const nj = simNodes[j];
             const dx = nj.x - ni.x, dy = nj.y - ni.y;
-            const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
-            const force = (1200 / (dist * dist)) * a;
+            const dist2 = dx * dx + dy * dy || 0.01;
+            const dist = Math.sqrt(dist2);
+            const force = (1600 / dist2) * a;
             const fx = (dx / dist) * force, fy = (dy / dist) * force;
             ni.vx -= fx; ni.vy -= fy;
             nj.vx += fx; nj.vy += fy;
           }
-          // Gravity to center
-          simNodes[i].vx += (cx - simNodes[i].x) * 0.01 * a;
-          simNodes[i].vy += (cy - simNodes[i].y) * 0.01 * a;
+
+          // Soft boundary repulsion — push away from walls gently
+          const bForce = 6 * a;
+          if (ni.x < MARGIN)       ni.vx += bForce * (MARGIN - ni.x) / MARGIN;
+          if (ni.x > W - MARGIN)   ni.vx -= bForce * (ni.x - (W - MARGIN)) / MARGIN;
+          if (ni.y < MARGIN)       ni.vy += bForce * (MARGIN - ni.y) / MARGIN;
+          if (ni.y > H - MARGIN)   ni.vy -= bForce * (ni.y - (H - MARGIN)) / MARGIN;
+
+          // Weak center gravity
+          ni.vx += (cx - ni.x) * 0.008 * a;
+          ni.vy += (cy - ni.y) * 0.008 * a;
         }
 
-        // Spring attraction (edges)
+        // Edge springs
         for (const e of simEdges) {
           const dx = e.target.x - e.source.x, dy = e.target.y - e.source.y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
-          const ideal = 80 + e.weight * 8;
-          const force = (dist - ideal) * 0.04 * a;
+          const force = (dist - IDEAL_DIST) * 0.05 * a;
           const fx = (dx / dist) * force, fy = (dy / dist) * force;
           e.source.vx += fx; e.source.vy += fy;
           e.target.vx -= fx; e.target.vy -= fy;
         }
 
-        // Integrate + dampen
+        // Integrate + soft clamp
         for (const n of simNodes) {
-          n.vx *= 0.85; n.vy *= 0.85;
+          n.vx *= 0.82; n.vy *= 0.82;
           n.x += n.vx; n.y += n.vy;
-          n.x = Math.max(20, Math.min(W - 20, n.x));
-          n.y = Math.max(20, Math.min(H - 20, n.y));
+          n.x = Math.max(n.radius + 2, Math.min(W - n.radius - 2, n.x));
+          n.y = Math.max(n.radius + 2, Math.min(H - n.radius - 2, n.y));
         }
       }
 
-      // Draw
+      // ── Draw ────────────────────────────────────────────────────────────────
+      const { x: ox, y: oy, scale } = viewRef.current;
+      const hov = hoveredRef.current;
+      const sel = simRef.current._selected;
+
       ctx.clearRect(0, 0, W, H);
       ctx.save();
       ctx.translate(ox, oy);
       ctx.scale(scale, scale);
 
-      // Edges
-      ctx.lineWidth = 0.8;
+      // Edges — dim non-connected when a node is highlighted
       for (const e of simEdges) {
-        const alpha = Math.min(1, 0.2 + e.weight * 0.1);
-        ctx.strokeStyle = `rgba(120,120,140,${alpha})`;
+        const connected = hov && (e.source === hov || e.target === hov);
+        const baseAlpha = connected ? 0.9 : (hov ? 0.08 : 0.35);
+        ctx.strokeStyle = connected
+          ? `rgba(255,255,255,${baseAlpha})`
+          : `rgba(120,130,150,${baseAlpha})`;
+        ctx.lineWidth = connected ? 1.5 : 0.8;
         ctx.beginPath();
         ctx.moveTo(e.source.x, e.source.y);
         ctx.lineTo(e.target.x, e.target.y);
         ctx.stroke();
+
+        // Relation label on connected edges only
+        if (connected && e.rel) {
+          const mx = (e.source.x + e.target.x) / 2;
+          const my = (e.source.y + e.target.y) / 2;
+          const relLabel = e.rel.replace(/_/g, ' ');
+          ctx.font = '9px monospace';
+          const tw = ctx.measureText(relLabel).width;
+          ctx.fillStyle = 'rgba(10,14,24,0.85)';
+          ctx.fillRect(mx - tw / 2 - 3, my - 8, tw + 6, 13);
+          ctx.fillStyle = 'rgba(200,210,230,0.9)';
+          ctx.fillText(relLabel, mx - tw / 2, my + 2);
+        }
       }
 
       // Nodes
       for (const n of simNodes) {
         const color = GRAPH_COLORS[n.color_idx % GRAPH_COLORS.length];
-        const isSelected = selectedNode && selectedNode.id === n.id;
+        const isHov = hov === n;
+        const isSel = sel && sel.id === n.id;
+        const dimmed = hov && !isHov;
 
-        // Glow for selected
-        if (isSelected) {
-          ctx.shadowColor = color;
-          ctx.shadowBlur = 12;
+        ctx.globalAlpha = dimmed ? 0.25 : 1;
+
+        // Outer glow ring for hovered/selected
+        if (isHov || isSel) {
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, n.radius + 5, 0, Math.PI * 2);
+          ctx.strokeStyle = color + '55';
+          ctx.lineWidth = 3;
+          ctx.stroke();
         }
 
+        // Node fill
         ctx.beginPath();
         ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-        ctx.fillStyle = color + (isSelected ? 'ff' : '99');
+        ctx.fillStyle = color + (isHov || isSel ? 'ee' : '88');
         ctx.fill();
         ctx.strokeStyle = color;
-        ctx.lineWidth = isSelected ? 2 : 0.5;
+        ctx.lineWidth = isHov || isSel ? 2 : 1;
         ctx.stroke();
-        ctx.shadowBlur = 0;
 
-        // Label only for high-degree nodes or selected
-        if (n.degree >= 3 || isSelected) {
-          ctx.font = `${isSelected ? 'bold ' : ''}${Math.max(9, Math.min(11, 8 + n.degree * 0.5))}px monospace`;
-          ctx.fillStyle = isSelected ? color : 'rgba(200,200,220,0.85)';
-          ctx.fillText(n.label.slice(0, 20), n.x + n.radius + 3, n.y + 4);
+        ctx.globalAlpha = 1;
+
+        // Label: always show for hovered/selected, or degree >= 2
+        const showLabel = isHov || isSel || (n.degree >= 2 && !dimmed);
+        if (showLabel) {
+          const label = n.label.length > 22 ? n.label.slice(0, 21) + '…' : n.label;
+          const fontSize = isHov || isSel ? 11 : Math.max(9, Math.min(10, 8 + n.degree * 0.4));
+          ctx.font = `${isHov || isSel ? 'bold ' : ''}${fontSize}px monospace`;
+          const tw = ctx.measureText(label).width;
+          const lx = n.x + n.radius + 5;
+          const ly = n.y + 4;
+
+          // Label background pill
+          ctx.fillStyle = 'rgba(8, 12, 22, 0.88)';
+          ctx.beginPath();
+          const pad = 3;
+          ctx.roundRect
+            ? ctx.roundRect(lx - pad, ly - fontSize, tw + pad * 2, fontSize + 4, 3)
+            : ctx.rect(lx - pad, ly - fontSize, tw + pad * 2, fontSize + 4);
+          ctx.fill();
+
+          // Label border (matches node color subtly)
+          ctx.strokeStyle = color + '44';
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+
+          // Label text
+          ctx.fillStyle = isHov || isSel ? color : 'rgba(210,220,235,0.95)';
+          ctx.fillText(label, lx, ly);
+        }
+
+        // Type badge for hovered/selected
+        if ((isHov || isSel) && n.type) {
+          ctx.font = '8px monospace';
+          const badge = n.type;
+          const bw = ctx.measureText(badge).width;
+          ctx.fillStyle = 'rgba(8,12,22,0.9)';
+          ctx.fillRect(n.x - bw / 2 - 4, n.y + n.radius + 3, bw + 8, 12);
+          ctx.fillStyle = color + 'cc';
+          ctx.fillText(badge, n.x - bw / 2, n.y + n.radius + 12);
         }
       }
 
@@ -1828,14 +1946,17 @@ function GraphPanel({ token, onToast, isReady }) {
     return () => { if (sim.raf) cancelAnimationFrame(sim.raf); };
   }, [graphData]);  // eslint-disable-line
 
-  // ── Mouse interactions ─────────────────────────────────────────────────────
+  // ── Mouse helpers ──────────────────────────────────────────────────────────
   const getCanvasPos = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
+    const r = canvasRef.current.getBoundingClientRect();
     const { x: ox, y: oy, scale } = viewRef.current;
-    return {
-      x: (e.clientX - rect.left - ox) / scale,
-      y: (e.clientY - rect.top - oy) / scale,
-    };
+    return { x: (e.clientX - r.left - ox) / scale, y: (e.clientY - r.top - oy) / scale };
+  };
+
+  const findNodeAt = ({ x, y }) => {
+    for (const n of simRef.current.nodes)
+      if (Math.hypot(n.x - x, n.y - y) < n.radius + 8) return n;
+    return null;
   };
 
   const onMouseDown = (e) => {
@@ -1843,6 +1964,9 @@ function GraphPanel({ token, onToast, isReady }) {
   };
 
   const onMouseMove = (e) => {
+    const pos = getCanvasPos(e);
+    hoveredRef.current = findNodeAt(pos);
+    canvasRef.current.style.cursor = hoveredRef.current ? 'pointer' : (dragRef.current ? 'grabbing' : 'grab');
     if (!dragRef.current) return;
     const dx = e.clientX - dragRef.current.startX;
     const dy = e.clientY - dragRef.current.startY;
@@ -1851,14 +1975,13 @@ function GraphPanel({ token, onToast, isReady }) {
     viewRef.current.y = dragRef.current.oy + dy;
   };
 
+  const onMouseLeave = () => { hoveredRef.current = null; };
+
   const onMouseUp = (e) => {
     if (!dragRef.current) return;
-    if (!dragRef.current.moved && simRef.current.nodeMap) {
-      const { x, y } = getCanvasPos(e);
-      let hit = null;
-      for (const n of simRef.current.nodes) {
-        if (Math.hypot(n.x - x, n.y - y) < n.radius + 6) { hit = n; break; }
-      }
+    if (!dragRef.current.moved) {
+      const hit = findNodeAt(getCanvasPos(e));
+      simRef.current._selected = hit;
       setSelectedNode(hit);
     }
     dragRef.current = null;
@@ -1866,21 +1989,20 @@ function GraphPanel({ token, onToast, isReady }) {
 
   const onWheel = (e) => {
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 0.9;
-    viewRef.current.scale = Math.max(0.2, Math.min(4, viewRef.current.scale * factor));
+    viewRef.current.scale = Math.max(0.2, Math.min(4, viewRef.current.scale * (e.deltaY < 0 ? 1.12 : 0.9)));
   };
 
   const resetView = () => { viewRef.current = { x: 0, y: 0, scale: 1 }; };
 
   return (
-    <div className="panel-content" style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%' }}>
-      {/* Header */}
+    <div className="panel-content" style={{ display: 'flex', flexDirection: 'column', gap: 8, height: '100%' }}>
+      {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <Network size={13} style={{ color: 'var(--neon-cyan)' }} />
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>Knowledge Graph</span>
-        {stats && stats.built_at && (
+        {stats && stats.nodes > 0 && (
           <span style={{ fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', marginLeft: 'auto' }}>
-            {stats.nodes}N · {stats.edges}E
+            {stats.nodes}N · {stats.edges}E · {stats.documents}D
           </span>
         )}
       </div>
@@ -1898,51 +2020,52 @@ function GraphPanel({ token, onToast, isReady }) {
           </button>
         )}
         {graphData && (
-          <button className="sl-footer-btn" onClick={resetView} title="Reset view">
+          <button className="sl-footer-btn" onClick={resetView} title="Reset pan/zoom">
             <ZoomIn size={11} />
           </button>
         )}
       </div>
 
-      {/* Stats bar */}
-      {stats && stats.nodes > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {[['Entities', stats.nodes], ['Relations', stats.edges], ['Documents', stats.documents]].map(([label, val]) => (
-            <div key={label} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px 10px', fontSize: 10, fontFamily: 'var(--font-mono)' }}>
-              <span style={{ color: 'var(--text-tertiary)' }}>{label} </span>
-              <span style={{ color: 'var(--neon-cyan)' }}>{val}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Canvas */}
       {graphData && graphData.nodes.length > 0 ? (
-        <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+        <div style={{ flex: 1, position: 'relative', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
           <canvas
             ref={canvasRef}
-            style={{ width: '100%', height: '100%', cursor: 'grab', display: 'block', background: 'var(--bg-raised)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}
+            style={{ flex: 1, width: '100%', display: 'block', background: '#080c16', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', minHeight: 0 }}
             onMouseDown={onMouseDown}
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}
+            onMouseLeave={onMouseLeave}
             onWheel={onWheel}
           />
-          {/* Selected node detail */}
+
+          {/* Document colour legend */}
+          {docLegend.length > 1 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', padding: '4px 2px' }}>
+              {docLegend.map(({ label, color }) => (
+                <span key={label} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                  {label.length > 24 ? '…' + label.slice(-22) : label}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Selected node card */}
           {selectedNode && (
-            <div style={{ position: 'absolute', bottom: 8, left: 8, right: 8, background: 'var(--bg-surface)', border: `1px solid ${GRAPH_COLORS[selectedNode.color_idx % GRAPH_COLORS.length]}44`, borderRadius: 'var(--radius-md)', padding: '8px 12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: GRAPH_COLORS[selectedNode.color_idx % GRAPH_COLORS.length], flexShrink: 0 }} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{selectedNode.label}</span>
-                <span style={{ fontSize: 9, color: 'var(--text-tertiary)', marginLeft: 'auto', background: 'var(--glass)', padding: '1px 6px', borderRadius: 6 }}>{selectedNode.type}</span>
+            <div style={{ background: 'var(--bg-surface)', border: `1px solid ${GRAPH_COLORS[selectedNode.color_idx % GRAPH_COLORS.length]}55`, borderRadius: 'var(--radius-md)', padding: '8px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: GRAPH_COLORS[selectedNode.color_idx % GRAPH_COLORS.length], flexShrink: 0 }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedNode.label}</span>
+                <span style={{ fontSize: 9, color: 'var(--text-tertiary)', background: 'var(--glass)', padding: '1px 6px', borderRadius: 6, flexShrink: 0 }}>{selectedNode.type}</span>
+                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 0, flexShrink: 0 }} onClick={() => { simRef.current._selected = null; setSelectedNode(null); }}>
+                  <X size={12} />
+                </button>
               </div>
               <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
-                {selectedNode.degree} connections · {selectedNode.chunk_count} chunk{selectedNode.chunk_count !== 1 ? 's' : ''}
+                {selectedNode.degree} connection{selectedNode.degree !== 1 ? 's' : ''} · {selectedNode.chunk_count} chunk{selectedNode.chunk_count !== 1 ? 's' : ''}
               </div>
-              {selectedNode.doc && (
-                <div style={{ fontSize: 9, color: 'var(--text-tertiary)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {selectedNode.doc}
-                </div>
-              )}
+              {selectedNode.doc && <div style={{ fontSize: 9, color: 'var(--text-tertiary)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedNode.doc}</div>}
             </div>
           )}
         </div>
@@ -1950,7 +2073,7 @@ function GraphPanel({ token, onToast, isReady }) {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-tertiary)', fontSize: 12, textAlign: 'center' }}>
           <Network size={32} style={{ opacity: 0.2 }} />
           <div>Click <strong>Build Graph</strong> to extract entities</div>
-          <div style={{ fontSize: 10, opacity: 0.7 }}>Uses LLM to map concepts, functions,<br/>and relationships across your documents</div>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>Maps concepts, functions &amp; relationships<br/>across your indexed documents</div>
         </div>
       )}
     </div>
@@ -2097,7 +2220,7 @@ export default function App() {
 
     if (useStreaming) {
       setStreaming(true);
-      let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0, provenance: null, graphPath: null };
+      let msg = { role: 'assistant', content: '', sources: [], route: null, memoriesUsed: 0, provenance: null, graphPath: null, subQueries: null };
       setMessages(p => [...p, msg]);
       const isFirstMsg = messages.length === 0;
       try {
@@ -2107,6 +2230,7 @@ export default function App() {
           else if (ev.type === 'memories') msg = { ...msg, memoriesUsed: ev.count };
           else if (ev.type === 'provenance') msg = { ...msg, provenance: ev.map };
           else if (ev.type === 'graph_path') msg = { ...msg, graphPath: ev.traversal };
+          else if (ev.type === 'decomposed') msg = { ...msg, subQueries: ev.sub_queries };
           else if (ev.type === 'token') msg = { ...msg, content: msg.content + ev.token };
           else if (ev.type === 'session_renamed') {
             setSessions(p => p.map(s => s.id === sid ? { ...s, title: ev.title } : s));
@@ -2233,6 +2357,7 @@ export default function App() {
                     {Array.from({ length: msg.route.steps }, (_, j) => <span key={j} className="agent-step"><span className="step-icon" /> step {j + 1}</span>)}
                   </div>}
                   <SourcesPanel sources={msg.sources} onViewPdf={setPdfSource} />
+                  <DecomposedBadge subQueries={msg.subQueries} />
                   <GraphPathBadge graphPath={msg.graphPath} />
                   <ProvenanceBadge provenance={msg.provenance} />
                 </div>

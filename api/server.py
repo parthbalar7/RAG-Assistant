@@ -33,6 +33,8 @@ from core.memory import (
 )
 from core.provenance import compute_provenance
 from core.knowledge_graph import get_user_graph, save_user_graph
+from core.query_cache import get_user_cache, invalidate_user_cache
+from core.decomposer import is_multi_part, decompose, merge_hits
 from api import database as db
 from api.auth import hash_password, verify_password, create_token, get_current_user, require_auth, decode_token
 
@@ -187,6 +189,7 @@ async def ingest(req: IngestReq, user=Depends(require_auth)):
         supported_found = exts & SUPPORTED_EXTENSIONS
         raise HTTPException(400, f"No supported documents found in {req.directory}. Found {file_count} files with extensions: {', '.join(sorted(exts)[:20]) or 'none'}. Supported matches: {', '.join(sorted(supported_found)) or 'none'}")
     added = s.add_chunks(chunks)
+    invalidate_user_cache(uid)
     return {"chunks_indexed": added, "documents_processed": len(set(c.document_path for c in chunks)),
             "collection_total": s.count, "files": sorted(set(c.document_path for c in chunks))}
 
@@ -207,6 +210,7 @@ async def upload(files: list[UploadFile] = File(...), user=Depends(require_auth)
         if chunks:
             total = s.add_chunks(chunks)
             processed = sorted(set(c.document_path for c in chunks))
+            invalidate_user_cache(uid)
     return {"chunks_indexed": total, "files_processed": processed,
             "documents_processed": len(processed), "collection_total": s.count}
 
@@ -392,6 +396,31 @@ async def ws_query_endpoint(websocket: WebSocket):
                 continue
 
             try:
+                # ── Semantic query cache check (standard RAG path only) ──────
+                if not use_pi:
+                    from core.retriever import embed_texts
+                    qcache = get_user_cache(uid)
+                    if qcache.size > 0:
+                        q_vec = await asyncio.to_thread(
+                            lambda: embed_texts([query_text])[0]
+                        )
+                        import numpy as np
+                        hit = qcache.lookup(np.array(q_vec, dtype="float32"))
+                        if hit is not None:
+                            await websocket.send_json({"type": "cache_hit", "sim": hit["sim"], "matched": hit["query_text"][:80]})
+                            await websocket.send_json({"type": "sources", "sources": hit["sources"]})
+                            for tok in hit["answer"].split(" "):
+                                await websocket.send_json({"type": "token", "token": tok + " "})
+                            if session_id:
+                                db.add_message(session_id, "user", query_text)
+                                db.add_message(session_id, "assistant", hit["answer"], hit["sources"])
+                                if is_first:
+                                    title = query_text[:50] + ("..." if len(query_text) > 50 else "")
+                                    db.update_session_title(session_id, title)
+                                    await websocket.send_json({"type": "session_renamed", "title": title})
+                            await websocket.send_json({"type": "done"})
+                            continue
+
                 if use_pi and pi_doc:
                     # ── PageIndex path ──────────────────────────────────────
                     await websocket.send_json({"type": "sources", "sources": []})
@@ -416,10 +445,34 @@ async def ws_query_endpoint(websocket: WebSocket):
                     route = route_query_fast(query_text) if use_routing else None
                     top_k = top_k_req or (route.suggested_top_k if route else settings.top_k)
 
-                    hits = await asyncio.to_thread(
-                        retrieve, store=s, query=query_text, top_k=top_k,
-                        use_reranking=use_reranking, use_hybrid=use_hybrid
-                    )
+                    # ── Query decomposition ──────────────────────────────────
+                    sub_queries = None
+                    if use_routing and is_multi_part(query_text):
+                        try:
+                            sub_queries = await asyncio.to_thread(decompose, query_text)
+                            # Only keep decomposition if we actually got multiple sub-queries
+                            if len(sub_queries) <= 1:
+                                sub_queries = None
+                        except Exception as de:
+                            logger.warning("Query decomposition failed: {}".format(de))
+                            sub_queries = None
+
+                    if sub_queries:
+                        # Retrieve independently for each sub-query, then merge
+                        hits_per_query = []
+                        for sq in sub_queries:
+                            sq_hits = await asyncio.to_thread(
+                                retrieve, store=s, query=sq, top_k=top_k,
+                                use_reranking=use_reranking, use_hybrid=use_hybrid
+                            )
+                            hits_per_query.append(sq_hits)
+                        hits = merge_hits(hits_per_query, max_total=top_k * 2)
+                        await websocket.send_json({"type": "decomposed", "sub_queries": sub_queries})
+                    else:
+                        hits = await asyncio.to_thread(
+                            retrieve, store=s, query=query_text, top_k=top_k,
+                            use_reranking=use_reranking, use_hybrid=use_hybrid
+                        )
 
                     # Graph-walk augmentation
                     graph_traversal = None
@@ -500,6 +553,21 @@ async def ws_query_endpoint(websocket: WebSocket):
 
                     full_answer = "".join(collected_answer)
 
+                    # Store in semantic query cache for future similar queries
+                    if full_answer:
+                        try:
+                            from core.retriever import embed_texts
+                            import numpy as np
+                            q_vec = await asyncio.to_thread(
+                                lambda: embed_texts([query_text])[0]
+                            )
+                            get_user_cache(uid).store(
+                                np.array(q_vec, dtype="float32"),
+                                query_text, full_answer, sources, hits
+                            )
+                        except Exception as ce:
+                            logger.warning("Query cache store failed: {}".format(ce))
+
                     if session_id:
                         db.add_message(session_id, "user", query_text)
                         db.add_message(session_id, "assistant", full_answer, sources)
@@ -546,10 +614,12 @@ async def file_tree(user=Depends(require_auth)):
 
 @app.delete("/api/files")
 async def delete_file(path: str, user=Depends(require_auth)):
-    s = get_user_store(user["id"])
+    uid = user["id"]
+    s = get_user_store(uid)
     deleted = s.delete_file(path)
     if deleted == 0:
         raise HTTPException(404, "File not found in index")
+    invalidate_user_cache(uid)
     return {"deleted_chunks": deleted, "path": path}
 
 
@@ -648,7 +718,9 @@ async def integrity_scan_detail(scan_id: str):
 
 @app.delete("/api/collection")
 async def clear(user=Depends(require_auth)):
-    get_user_store(user["id"]).clear()
+    uid = user["id"]
+    get_user_store(uid).clear()
+    invalidate_user_cache(uid)
     return {"status": "cleared"}
 
 
