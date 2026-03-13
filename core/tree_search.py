@@ -282,7 +282,8 @@ def generate_answer(
         "answer": answer_text.strip(),
         "retrieved_nodes": [
             {"node_id": s["node_id"], "title": s["title"],
-             "start_page": s["start_page"], "end_page": s["end_page"]}
+             "start_page": s["start_page"], "end_page": s["end_page"],
+             "text": s.get("text", "")}
             for s in retrieved_sections
         ],
         "pages_referenced": sorted(set(all_pages)),
@@ -300,29 +301,36 @@ def tree_search_query(
     tree_data: dict,
     stream: bool = False,
     conversation_history: list = None,
+    search_query: str = None,
 ) -> dict:
     """Complete tree search pipeline:
     1. Navigate tree (LLM reasons about which branches)
     2. Extract content from selected nodes
     3. Generate answer with citations
 
+    Args:
+        search_query: Optional override for tree navigation only (used by HyDE).
+                      If set, navigation uses this text; answer generation still uses `query`.
+
     Returns: {
         "answer": "...",
         "method": "tree_search",
-        "retrieved_nodes": [...],
+        "retrieved_nodes": [...],   # includes "text" field
         "pages_referenced": [...],
         "confidence": "high|medium|low",
         "reasoning": "Why these sections were selected"
     }
     """
     # Add conversation context to query if available
-    full_query = query
+    # search_query overrides query for navigation (HyDE: hypothetical doc finds better nodes)
+    nav_query = search_query or query
+    full_query = nav_query
     if conversation_history:
         context = "\n".join(
             f"{m.get('role', 'user')}: {m.get('content', '')}"
             for m in conversation_history[-4:]  # Last 4 messages
         )
-        full_query = f"Conversation context:\n{context}\n\nCurrent question: {query}"
+        full_query = f"Conversation context:\n{context}\n\nCurrent question: {nav_query}"
 
     # Step 1: Navigate
     nav_result = navigate_tree(full_query, tree_data)
@@ -351,7 +359,8 @@ def tree_search_query(
             "method": "tree_search",
             "retrieved_nodes": [
                 {"node_id": s["node_id"], "title": s["title"],
-                 "start_page": s["start_page"], "end_page": s["end_page"]}
+                 "start_page": s["start_page"], "end_page": s["end_page"],
+                 "text": s.get("text", "")}
                 for s in sections
             ],
             "pages_referenced": sorted(set(

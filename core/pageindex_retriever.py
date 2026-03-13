@@ -175,8 +175,14 @@ def chat_query(
     conversation_history: list = None,
     enable_citations: bool = False,
     temperature: float = None,
+    search_query: str = None,
 ) -> dict:
     """Query documents using LLM tree search (non-streaming).
+
+    Args:
+        search_query: Optional override used only for tree navigation (HyDE support).
+                      If set, node selection uses this text; answer generation uses `query`.
+
     Returns: {"answer": "...", "usage": {...}, ...}
     """
     if not doc_id:
@@ -199,6 +205,7 @@ def chat_query(
             tree_data=tree,
             stream=False,
             conversation_history=conversation_history,
+            search_query=search_query,
         )
         all_answers.append(result.get("answer", ""))
         all_nodes.extend(result.get("retrieved_nodes", []))

@@ -37,6 +37,7 @@ from core.query_cache import get_user_cache, invalidate_user_cache
 from core.decomposer import is_multi_part, decompose, merge_hits
 from core.gap_analyzer import analyze as analyze_gap
 from core.web_augmenter import augment as web_augment
+from core.hyde import generate_hypothetical_doc
 from api import database as db
 from api.auth import hash_password, verify_password, create_token, get_current_user, require_auth, decode_token
 
@@ -407,6 +408,8 @@ async def ws_query_endpoint(websocket: WebSocket):
             use_routing = qd.get("use_routing", True)
             use_memory = qd.get("use_memory", True)
             use_graph  = qd.get("use_graph", False)
+            use_hyde   = qd.get("use_hyde", False)
+            use_splade = qd.get("use_splade", False)
             top_k_req = qd.get("top_k")
             is_first = not conv_history
 
@@ -420,46 +423,177 @@ async def ws_query_endpoint(websocket: WebSocket):
                 continue
 
             try:
-                # ── Semantic query cache check (standard RAG path only) ──────
-                if not use_pi:
-                    from core.retriever import embed_texts
-                    qcache = get_user_cache(uid)
-                    if qcache.size > 0:
-                        q_vec = await asyncio.to_thread(
-                            lambda: embed_texts([query_text])[0]
-                        )
-                        import numpy as np
-                        hit = qcache.lookup(np.array(q_vec, dtype="float32"))
-                        if hit is not None:
-                            await websocket.send_json({"type": "cache_hit", "sim": hit["sim"], "matched": hit["query_text"][:80]})
-                            await websocket.send_json({"type": "sources", "sources": hit["sources"]})
-                            for tok in hit["answer"].split(" "):
-                                await websocket.send_json({"type": "token", "token": tok + " "})
-                            if session_id:
-                                db.add_message(session_id, "user", query_text)
-                                db.add_message(session_id, "assistant", hit["answer"], hit["sources"])
-                                if is_first:
-                                    title = query_text[:50] + ("..." if len(query_text) > 50 else "")
-                                    db.update_session_title(session_id, title)
-                                    await websocket.send_json({"type": "session_renamed", "title": title})
-                            await websocket.send_json({"type": "done"})
-                            continue
+                # ── Semantic query cache (universal — both RAG and PageIndex paths) ─
+                from core.retriever import embed_texts
+                import numpy as np
+                qcache = get_user_cache(uid)
+                if qcache.size > 0:
+                    q_vec = await asyncio.to_thread(
+                        lambda: embed_texts([query_text])[0]
+                    )
+                    hit = qcache.lookup(np.array(q_vec, dtype="float32"))
+                    if hit is not None:
+                        await websocket.send_json({"type": "cache_hit", "sim": hit["sim"], "matched": hit["query_text"][:80]})
+                        await websocket.send_json({"type": "sources", "sources": hit["sources"]})
+                        words = hit["answer"].split()
+                        chunk, CHUNK_SIZE = [], 10
+                        for i, w in enumerate(words):
+                            chunk.append(w)
+                            if len(chunk) >= CHUNK_SIZE or i == len(words) - 1:
+                                await websocket.send_json({"type": "token", "token": " ".join(chunk) + " "})
+                                chunk = []
+                        if session_id:
+                            db.add_message(session_id, "user", query_text)
+                            db.add_message(session_id, "assistant", hit["answer"], hit["sources"])
+                            if is_first:
+                                title = query_text[:50] + ("..." if len(query_text) > 50 else "")
+                                db.update_session_title(session_id, title)
+                                await websocket.send_json({"type": "session_renamed", "title": title})
+                        await websocket.send_json({"type": "done"})
+                        continue
 
                 if use_pi and pi_doc:
-                    # ── PageIndex path ──────────────────────────────────────
-                    await websocket.send_json({"type": "sources", "sources": []})
+                    # ── PageIndex path (full feature parity) ────────────────
+
+                    # 1. Memory retrieval
+                    pi_memory_ctx = None
+                    if use_memory and settings.memory_enabled:
+                        try:
+                            mem_store = get_memory_store(uid)
+                            pi_memory_ctx = retrieve_memories(mem_store, query_text)
+                        except Exception as me:
+                            logger.warning("Memory retrieval failed (PageIndex): {}".format(me))
+
+                    # 2. Query decomposition
+                    pi_sub_queries = None
+                    if use_routing and is_multi_part(query_text):
+                        try:
+                            pi_sub_queries = await asyncio.to_thread(decompose, query_text)
+                            if len(pi_sub_queries) <= 1:
+                                pi_sub_queries = None
+                        except Exception as de:
+                            logger.warning("Query decomposition failed (PageIndex): {}".format(de))
+
+                    # 3. HyDE: generate hypothetical doc for better tree node selection
+                    pi_hyde_query = None
+                    if use_hyde:
+                        try:
+                            pi_hyde_query = await asyncio.to_thread(generate_hypothetical_doc, query_text)
+                        except Exception as he:
+                            logger.warning("HyDE failed (PageIndex): {}".format(he))
+
+                    # 4. Build augmented history with memory context prepended
+                    aug_history = list(conv_history)
+                    if pi_memory_ctx and pi_memory_ctx.count > 0:
+                        mem_block = "\n".join("- " + f.content for f in pi_memory_ctx.fragments)
+                        aug_history = [
+                            {"role": "user", "content": "[Memory context]\n{}\n[/Memory context]".format(mem_block)},
+                            {"role": "assistant", "content": "Noted the memory context."},
+                        ] + aug_history
+
+                    # 5. Route + memories events
                     await websocket.send_json({"type": "route", "route": {"category": "pageindex", "strategy": "tree_reasoning"}})
-                    result = await asyncio.to_thread(
-                        pindex.chat_query, query_text,
-                        doc_id=pi_doc, conversation_history=conv_history
-                    )
-                    answer = result["answer"]
-                    # Send word-by-word to simulate streaming
-                    for tok in answer.split(' '):
-                        await websocket.send_json({"type": "token", "token": tok + ' '})
+                    if pi_memory_ctx and pi_memory_ctx.count > 0:
+                        await websocket.send_json({"type": "memories", "count": pi_memory_ctx.count})
+
+                    # 6. Tree search (decomposed parallel or single)
+                    if pi_sub_queries:
+                        pi_tasks = [
+                            asyncio.to_thread(
+                                pindex.chat_query, sq,
+                                doc_id=pi_doc, conversation_history=aug_history,
+                                search_query=pi_hyde_query,
+                            )
+                            for sq in pi_sub_queries
+                        ]
+                        pi_results = await asyncio.gather(*pi_tasks)
+                        answer_parts, pi_retrieved_nodes = [], []
+                        for sq, r in zip(pi_sub_queries, pi_results):
+                            answer_parts.append("**{}**\n{}".format(sq, r["answer"]))
+                            pi_retrieved_nodes.extend(r.get("retrieved_nodes", []))
+                        answer = "\n\n".join(answer_parts)
+                        await websocket.send_json({"type": "decomposed", "sub_queries": pi_sub_queries})
+                    else:
+                        pi_result = await asyncio.to_thread(
+                            pindex.chat_query, query_text,
+                            doc_id=pi_doc, conversation_history=aug_history,
+                            search_query=pi_hyde_query,
+                        )
+                        answer = pi_result["answer"]
+                        pi_retrieved_nodes = pi_result.get("retrieved_nodes", [])
+
+                    # 7. Build real sources from retrieved nodes
+                    pi_sources = [
+                        {
+                            "file": pi_doc,
+                            "lines": "p{}-{}".format(n.get("start_page", "?"), n.get("end_page", "?")),
+                            "language": "pdf",
+                            "score": 0.6,
+                            "search_type": "tree_search",
+                            "preview": n.get("text", "")[:200],
+                        }
+                        for n in pi_retrieved_nodes
+                    ]
+                    await websocket.send_json({"type": "sources", "sources": pi_sources})
+
+                    # 8. Stream answer in chunks
+                    words = answer.split()
+                    chunk, CHUNK_SIZE = [], 10
+                    for i, w in enumerate(words):
+                        chunk.append(w)
+                        if len(chunk) >= CHUNK_SIZE or i == len(words) - 1:
+                            await websocket.send_json({"type": "token", "token": " ".join(chunk) + " "})
+                            chunk = []
+
+                    # 9. Provenance
+                    if pi_retrieved_nodes and answer:
+                        try:
+                            pi_chunks = [
+                                {"content": n.get("text", ""), "metadata": {
+                                    "document_path": pi_doc,
+                                    "start_line": n.get("start_page", "?"),
+                                    "end_line":   n.get("end_page", "?"),
+                                }}
+                                for n in pi_retrieved_nodes if n.get("text")
+                            ]
+                            pi_mem_frags = pi_memory_ctx.fragments if pi_memory_ctx else []
+                            pi_hist_dicts = [{"role": m["role"], "content": m["content"]} for m in (conv_history or [])]
+                            prov = await asyncio.to_thread(
+                                compute_provenance, answer, pi_chunks, pi_mem_frags, query_text, pi_hist_dicts
+                            )
+                            if prov:
+                                await websocket.send_json({"type": "provenance", "map": prov.to_dict()})
+                        except Exception as pe:
+                            logger.warning("Provenance failed (PageIndex): {}".format(pe))
+
+                    # 10. Gap analysis
+                    try:
+                        pi_hits = [{"score": 0.6, "content": n.get("text", ""), "metadata": {}} for n in pi_retrieved_nodes]
+                        gap = analyze_gap(query_text, pi_hits, answer)
+                        if gap.is_gap:
+                            await websocket.send_json({"type": "gap_detected", "topic": gap.topic,
+                                                       "reason": gap.reason, "top_score": round(gap.top_score, 3)})
+                    except Exception as ge:
+                        logger.warning("Gap analysis failed (PageIndex): {}".format(ge))
+
+                    # 11. Cache store
+                    try:
+                        q_vec = await asyncio.to_thread(lambda: embed_texts([query_text])[0])
+                        get_user_cache(uid).store(np.array(q_vec, dtype="float32"), query_text, answer, pi_sources, [])
+                    except Exception as ce:
+                        logger.warning("Cache store failed (PageIndex): {}".format(ce))
+
+                    # 12. Memory extraction
+                    if settings.memory_enabled and settings.memory_auto_extract:
+                        try:
+                            await asyncio.to_thread(process_turn_memories, uid, query_text, answer, session_id or "")
+                        except Exception as me:
+                            logger.warning("Memory extraction failed (PageIndex): {}".format(me))
+
+                    # 13. Persist to DB
                     if session_id:
                         db.add_message(session_id, "user", query_text)
-                        db.add_message(session_id, "assistant", answer)
+                        db.add_message(session_id, "assistant", answer, pi_sources)
                         if is_first:
                             title = query_text[:50] + ('...' if len(query_text) > 50 else '')
                             db.update_session_title(session_id, title)
@@ -482,20 +616,23 @@ async def ws_query_endpoint(websocket: WebSocket):
                             sub_queries = None
 
                     if sub_queries:
-                        # Retrieve independently for each sub-query, then merge
-                        hits_per_query = []
-                        for sq in sub_queries:
-                            sq_hits = await asyncio.to_thread(
+                        # Retrieve independently for each sub-query in parallel, then merge
+                        tasks = [
+                            asyncio.to_thread(
                                 retrieve, store=s, query=sq, top_k=top_k,
-                                use_reranking=use_reranking, use_hybrid=use_hybrid
+                                use_reranking=use_reranking, use_hybrid=use_hybrid,
+                                use_hyde=use_hyde, use_splade=use_splade
                             )
-                            hits_per_query.append(sq_hits)
+                            for sq in sub_queries
+                        ]
+                        hits_per_query = list(await asyncio.gather(*tasks))
                         hits = merge_hits(hits_per_query, max_total=top_k * 2)
                         await websocket.send_json({"type": "decomposed", "sub_queries": sub_queries})
                     else:
                         hits = await asyncio.to_thread(
                             retrieve, store=s, query=query_text, top_k=top_k,
-                            use_reranking=use_reranking, use_hybrid=use_hybrid
+                            use_reranking=use_reranking, use_hybrid=use_hybrid,
+                            use_hyde=use_hyde, use_splade=use_splade
                         )
 
                     # Graph-walk augmentation
@@ -571,7 +708,8 @@ async def ws_query_endpoint(websocket: WebSocket):
                             collected_answer.append(item_val)
                             try:
                                 await websocket.send_json({"type": "token", "token": item_val})
-                            except Exception:
+                            except Exception as ws_err:
+                                logger.debug("WS send failed (client likely disconnected): {}".format(ws_err))
                                 stop_event.set()
                                 break
 
@@ -580,11 +718,7 @@ async def ws_query_endpoint(websocket: WebSocket):
                     # Store in semantic query cache for future similar queries
                     if full_answer:
                         try:
-                            from core.retriever import embed_texts
-                            import numpy as np
-                            q_vec = await asyncio.to_thread(
-                                lambda: embed_texts([query_text])[0]
-                            )
+                            q_vec = await asyncio.to_thread(lambda: embed_texts([query_text])[0])
                             get_user_cache(uid).store(
                                 np.array(q_vec, dtype="float32"),
                                 query_text, full_answer, sources, hits

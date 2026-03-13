@@ -59,8 +59,19 @@ class EmbedCache:
             if not self._dirty:   # double-check after acquiring lock
                 return
             try:
+                import os, tempfile
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(str(self.path), **self._store)
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=self.path.parent, suffix=".npz.tmp")
+                os.close(tmp_fd)
+                try:
+                    np.savez_compressed(tmp_path, **self._store)
+                    os.replace(tmp_path, str(self.path))
+                except Exception:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
                 self._dirty = False
                 logger.info("Embed cache saved: {} entries ({})".format(
                     len(self._store), self.path))

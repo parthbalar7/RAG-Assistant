@@ -86,7 +86,8 @@ def analyze(query: str, hits: list[dict], answer: str = "") -> GapResult:
             top_score=0.0,
         )
 
-    top_score = float(hits[0].get("rerank_score", hits[0].get("score", 0.0)))
+    _rs = hits[0].get("rerank_score") or hits[0].get("score") or 0.0
+    top_score = float(_rs)
 
     # ── Signal 2: weak retrieval score ────────────────────────────────────────
     if top_score < GAP_SCORE_THRESHOLD:

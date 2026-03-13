@@ -165,7 +165,7 @@ def _parse_sub_queries(text: str, fallback: str) -> list[str]:
         pass
 
     # Try to extract first JSON array from the text
-    m = re.search(r'\[.*?\]', text, re.DOTALL)
+    m = re.search(r'\[.*\]', text, re.DOTALL)
     if m:
         try:
             obj = json.loads(m.group())

@@ -319,8 +319,8 @@ function GraphPathBadge({ graphPath }) {
 }
 
 /* ── GapPrompt ── */
-function GapPrompt({ gap, query, token, onIngested }) {
-  const [state, setState] = useState('idle'); // idle | searching | done | dismissed | error
+function GapPrompt({ gap, query, token, onIngested, onAutoRequery }) {
+  const [state, setState] = useState('idle'); // idle | searching | ingested | requeryng | done | dismissed | error
   const [result, setResult] = useState(null);
 
   if (!gap || state === 'dismissed') return null;
@@ -340,9 +340,18 @@ function GapPrompt({ gap, query, token, onIngested }) {
         if (ev.type === 'web_search_started') setState('searching');
         else if (ev.type === 'web_ingested') {
           setResult(ev);
-          setState(ev.error && ev.chunks_added === 0 ? 'error' : 'done');
-          if (ev.chunks_added > 0 && onIngested) onIngested(ev);
           ws.close();
+          if (ev.error && ev.chunks_added === 0) {
+            setState('error');
+          } else {
+            setState('requerying');
+            if (ev.chunks_added > 0 && onIngested) onIngested(ev);
+            // Auto-requery after a short delay so user sees the status flash
+            setTimeout(() => {
+              if (onAutoRequery) onAutoRequery(query);
+              setState('done');
+            }, 800);
+          }
         }
       } catch {}
     };
@@ -372,12 +381,17 @@ function GapPrompt({ gap, query, token, onIngested }) {
           <span>Searching the web for <em>"{gap.topic}"</em>…</span>
         </div>
       )}
+      {state === 'requerying' && result && (
+        <div className="gap-prompt-body">
+          <RefreshCw size={11} style={{ color: 'var(--neon-cyan)', animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+          <span>Added <strong>{result.chunks_added} chunks</strong> — re-asking your question…</span>
+        </div>
+      )}
       {state === 'done' && result && (
         <div className="gap-prompt-body">
           <CheckCircle2 size={11} style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
           <span>
-            Added <strong>{result.chunks_added} chunks</strong> from {result.urls?.length || 0} source(s).
-            Ask your question again for better results.
+            Added <strong>{result.chunks_added} chunks</strong> from {result.urls?.length || 0} source(s) and re-queried.
           </span>
         </div>
       )}
@@ -2198,6 +2212,8 @@ export default function App() {
   const [usePageIndex, setUsePageIndex] = useState(false);
   const [useMemory, setUseMemory] = useState(true);
   const [useGraph, setUseGraph] = useState(false);
+  const [useHyDE, setUseHyDE] = useState(false);
+  const [useSplade, setUseSplade] = useState(false);
 
   // LLM backend
   const [llmStatus, setLlmStatus] = useState(null);       // {backend, model, ollama_reachable, ...}
@@ -2280,16 +2296,16 @@ export default function App() {
     catch (e) { setActiveSession(null); setMessages([]); }
   };
 
-  const handleSend = async () => {
-    const q = input.trim();
+  const handleSend = async (queryOverride) => {
+    const q = (queryOverride !== undefined ? queryOverride : input).trim();
     if (!q || loading || streaming) return;
-    setInput('');
+    if (queryOverride === undefined) setInput('');
     let sid = activeSession;
     if (!sid) {
       try { const s = await api.post('/api/sessions', {}, token); setSessions(p => [s, ...p]); sid = s.id; setActiveSession(s.id); } catch (e) { /* ok */ }
     }
     setMessages(p => [...p, { role: 'user', content: q }]);
-    const opts = { use_reranking: useReranking, use_hybrid: useHybrid, use_routing: useRouting, use_agent: useAgent, use_pageindex: !!(usePageIndex && piActiveDoc), pageindex_doc_id: piActiveDoc || null, use_memory: useMemory, use_graph: useGraph };
+    const opts = { use_reranking: useReranking, use_hybrid: useHybrid, use_routing: useRouting, use_hyde: useHyDE, use_splade: useSplade, use_agent: useAgent, use_pageindex: !!(usePageIndex && piActiveDoc), pageindex_doc_id: piActiveDoc || null, use_memory: useMemory, use_graph: useGraph };
 
     if (useStreaming) {
       setStreaming(true);
@@ -2434,7 +2450,7 @@ export default function App() {
                   <DecomposedBadge subQueries={msg.subQueries} />
                   <GraphPathBadge graphPath={msg.graphPath} />
                   <ProvenanceBadge provenance={msg.provenance} />
-                  <GapPrompt gap={msg.gap} query={msg.query || ''} token={token} onIngested={() => addToast('success', 'Web content ingested — ask again for better results!')} />
+                  <GapPrompt gap={msg.gap} query={msg.query || ''} token={token} onIngested={() => addToast('success', 'Web content ingested — re-querying…')} onAutoRequery={(q) => handleSend(q)} />
                 </div>
               )}
             </div>
@@ -2503,6 +2519,10 @@ export default function App() {
                 <div className="setting-row"><span>Hybrid search</span><div className={'toggle ' + (useHybrid ? 'on' : '')} onClick={() => setUseHybrid(!useHybrid)} /></div>
                 <div className="setting-row"><span>Reranking</span><div className={'toggle ' + (useReranking ? 'on' : '')} onClick={() => setUseReranking(!useReranking)} /></div>
                 <div className="setting-row"><span>Query routing</span><div className={'toggle ' + (useRouting ? 'on' : '')} onClick={() => setUseRouting(!useRouting)} /></div>
+                <div className="setting-row"><span>HyDE query expansion</span><div className={'toggle ' + (useHyDE ? 'on' : '')} onClick={() => setUseHyDE(!useHyDE)} /></div>
+                {useHyDE && <div className="settings-hint">Generates a hypothetical answer to improve vector search relevance. Adds ~300-800ms per query.</div>}
+                <div className="setting-row"><span>SPLADE sparse retrieval</span><div className={'toggle ' + (useSplade ? 'on' : '')} onClick={() => setUseSplade(!useSplade)} /></div>
+                {useSplade && <div className="settings-hint">Learned vocabulary expansion replaces BM25. Requires RAG_SPLADE_ENABLED=true in .env to take effect.</div>}
               </div>
 
               <div className="settings-card">

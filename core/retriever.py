@@ -134,13 +134,31 @@ class VectorStore:
             metadata={"hnsw:space": "cosine"},
         )
         self.bm25_index = BM25Index()
-        self._rebuild_bm25()
+        self.splade_index = None   # built only when settings.splade_enabled=True
+        self._rebuild_indexes()
 
         logger.info("VectorStore ready: {} ({} docs)".format(collection_name, self.collection.count()))
 
+    def _rebuild_indexes(self):
+        """Rebuild BM25 (always) and SPLADE (when enabled) from the collection."""
+        if self.collection.count() == 0:
+            return
+        self.bm25_index.build_from_collection(self.collection)
+        if settings.splade_enabled:
+            try:
+                if self.splade_index is None:
+                    from core.splade_index import SPLADEIndex
+                    self.splade_index = SPLADEIndex(settings.splade_model)
+                self.splade_index.build_from_collection(self.collection)
+            except Exception as e:
+                logger.warning(
+                    "SPLADE index build failed (falling back to BM25): {}".format(e)
+                )
+                self.splade_index = None
+
+    # Keep the old name as an alias so any external callers aren't broken
     def _rebuild_bm25(self):
-        if self.collection.count() > 0:
-            self.bm25_index.build_from_collection(self.collection)
+        self._rebuild_indexes()
 
     @property
     def count(self):
@@ -171,7 +189,7 @@ class VectorStore:
             added += len(batch)
             logger.info("Indexed {}/{} chunks".format(added, len(chunks)))
 
-        self._rebuild_bm25()
+        self._rebuild_indexes()
         return added
 
     def vector_search(self, query_text, top_k=10, language_filter=None):
@@ -201,41 +219,39 @@ class VectorStore:
                     })
         return hits
 
-    def hybrid_search(self, query_text, top_k=10, language_filter=None):
-        vector_hits = self.vector_search(query_text, top_k=top_k, language_filter=language_filter)
-        bm25_hits = self.bm25_index.search(query_text, top_k=top_k)
-
-        # Reciprocal Rank Fusion
+    def _rrf_merge(self, vector_hits, bm25_hits, top_k):
+        """Reciprocal Rank Fusion of pre-computed vector and BM25 hit lists."""
         k = 60
         fused_scores = {}
 
         for rank, hit in enumerate(vector_hits):
             key = hit["content"][:100]
-            rrf_score = settings.vector_weight / (k + rank + 1)
             if key not in fused_scores:
                 fused_scores[key] = dict(hit)
                 fused_scores[key]["rrf_score"] = 0
                 fused_scores[key]["search_types"] = []
-            fused_scores[key]["rrf_score"] += rrf_score
+            fused_scores[key]["rrf_score"] += settings.vector_weight / (k + rank + 1)
             fused_scores[key]["search_types"].append("vector")
 
         for rank, hit in enumerate(bm25_hits):
             key = hit["content"][:100]
-            rrf_score = settings.bm25_weight / (k + rank + 1)
             if key not in fused_scores:
                 fused_scores[key] = dict(hit)
                 fused_scores[key]["rrf_score"] = 0
                 fused_scores[key]["search_types"] = []
-            fused_scores[key]["rrf_score"] += rrf_score
+            fused_scores[key]["rrf_score"] += settings.bm25_weight / (k + rank + 1)
             fused_scores[key]["search_types"].append("bm25")
 
         results = sorted(fused_scores.values(), key=lambda x: x["rrf_score"], reverse=True)
-
         for hit in results:
             hit["score"] = hit["rrf_score"]
             hit["search_type"] = "+".join(set(hit.get("search_types", ["unknown"])))
-
         return results[:top_k]
+
+    def hybrid_search(self, query_text, top_k=10, language_filter=None):
+        vector_hits = self.vector_search(query_text, top_k=top_k, language_filter=language_filter)
+        bm25_hits = self.bm25_index.search(query_text, top_k=top_k)
+        return self._rrf_merge(vector_hits, bm25_hits, top_k)
 
     def get_all_files(self):
         if self.count == 0:
@@ -268,7 +284,7 @@ class VectorStore:
         ]
         if ids_to_delete:
             self.collection.delete(ids=ids_to_delete)
-            self._rebuild_bm25()
+            self._rebuild_indexes()
             logger.info("Deleted {} chunks for {}".format(len(ids_to_delete), file_path))
         return len(ids_to_delete)
 
@@ -280,6 +296,7 @@ class VectorStore:
             metadata={"hnsw:space": "cosine"},
         )
         self.bm25_index = BM25Index()
+        self.splade_index = None
         logger.info("Vector store cleared")
 
 
@@ -303,18 +320,55 @@ def rerank(query, hits, top_k=None):
 
 # ── High-level retrieval ──
 
-def retrieve(store, query, top_k=None, rerank_top_k=None, use_reranking=True, use_hybrid=True, language_filter=None):
+def retrieve(store, query, top_k=None, rerank_top_k=None, use_reranking=True, use_hybrid=True, language_filter=None, use_hyde=False, use_splade=False):
     top_k = top_k or settings.top_k
 
-    if use_hybrid:
-        hits = store.hybrid_search(query, top_k=top_k, language_filter=language_filter)
-    else:
-        hits = store.vector_search(query, top_k=top_k, language_filter=language_filter)
+    # HyDE: embed a hypothetical answer instead of the raw query for vector search.
+    # Sparse retrieval (BM25/SPLADE) always uses the original query text.
+    vector_query = query
+    if use_hyde:
+        from core.hyde import generate_hypothetical_doc
+        hypo = generate_hypothetical_doc(query)
+        if hypo:
+            vector_query = hypo
 
-    logger.info("Retrieved {} hits for: {}".format(len(hits), query[:80]))
+    hyde_active = use_hyde and vector_query != query
+
+    # Sparse retrieval: prefer SPLADE when requested and available, else BM25
+    splade_available = use_splade and getattr(store, "splade_index", None) is not None
+    sparse_label = "splade" if splade_available else "bm25"
+
+    def sparse_search(q, k):
+        if splade_available:
+            return store.splade_index.search(q, top_k=k)
+        return store.bm25_index.search(q, top_k=k)
+
+    if use_hybrid:
+        if hyde_active:
+            # Split paths: hypothetical doc → vector, original query → sparse
+            vector_hits = store.vector_search(vector_query, top_k=top_k, language_filter=language_filter)
+            sparse_hits = sparse_search(query, top_k)
+            hits = store._rrf_merge(vector_hits, sparse_hits, top_k)
+        else:
+            if splade_available:
+                # Manual hybrid so SPLADE replaces BM25 in the RRF merge
+                vector_hits = store.vector_search(query, top_k=top_k, language_filter=language_filter)
+                sparse_hits = sparse_search(query, top_k)
+                hits = store._rrf_merge(vector_hits, sparse_hits, top_k)
+            else:
+                hits = store.hybrid_search(query, top_k=top_k, language_filter=language_filter)
+    else:
+        hits = store.vector_search(vector_query, top_k=top_k, language_filter=language_filter)
+
+    tag = ""
+    if hyde_active:
+        tag += " [HyDE]"
+    if splade_available:
+        tag += " [SPLADE]"
+    logger.info("Retrieved {} hits for: {}{}".format(len(hits), query[:80], tag))
 
     if use_reranking and len(hits) > 1:
-        hits = rerank(query, hits, top_k=rerank_top_k)
+        hits = rerank(query, hits, top_k=rerank_top_k)  # always rerank against original query
         logger.info("Reranked to {} hits".format(len(hits)))
 
     return hits

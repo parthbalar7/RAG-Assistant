@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:claude.ai)"
+      "WebFetch(domain:claude.ai)",
+      "WebSearch",
+      "WebFetch(domain:weaviate.io)",
+      "WebFetch(domain:zilliz.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:sease.io)",
+      "WebFetch(domain:pinecone.io)",
+      "WebFetch(domain:sbert.net)"
     ]
   }
 }

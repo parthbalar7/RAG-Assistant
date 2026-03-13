@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     bm25_weight: float = Field(default=0.3)
     vector_weight: float = Field(default=0.7)
 
+    # --- SPLADE (learned sparse retrieval) ---
+    splade_enabled: bool = Field(default=False, description="Build SPLADE index at startup (requires sentence-transformers>=3.0)")
+    splade_model: str = Field(default="prithivida/Splade_PP_en_v1", description="HuggingFace model ID for SPLADE (must be publicly accessible)")
+
     # --- Agent ---
     agent_max_steps: int = Field(default=5)
 
