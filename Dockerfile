@@ -3,7 +3,7 @@
 # ═══════════════════════════════════════════════════
 
 # ── Stage 1: Build React frontend ──
-FROM node:20-slim AS frontend-builder
+FROM node:20.12-slim AS frontend-builder
 WORKDIR /build
 COPY package*.json ./
 RUN npm install --no-audit --no-fund
@@ -12,7 +12,7 @@ COPY public/ ./public/
 RUN npm run build
 
 # ── Stage 2: Python runtime ──
-FROM python:3.12-slim AS runtime
+FROM python:3.12.3-slim AS runtime
 
 # System deps for PyMuPDF, sentence-transformers, and general build
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,6 +31,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+# spaCy NER model for LLM-free graph extraction (RAG_GRAPH_EXTRACTION=ner);
+# separate layer so source-only changes reuse the cached download
+RUN python -m spacy download en_core_web_sm
 
 # Copy application code
 COPY config.py main.py ./

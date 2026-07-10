@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python linters
+        run: pip install ruff mypy
+
+      - name: Ruff lint
+        run: ruff check api/ core/ config.py main.py
+
+      - name: Ruff format check
+        run: ruff format --check api/ core/ config.py main.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npx eslint src/
+
+      - name: Prettier check
+        run: npx prettier --check "src/**/*.{js,jsx,css}"
+
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          RAG_DATABASE_PATH: ./test_data/test.db
+          RAG_JWT_SECRET: ci-test-secret
+          RAG_ANTHROPIC_API_KEY: ""
+        run: pytest tests/ -v --cov=api --cov=core --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npx react-scripts test --watchAll=false --coverage
+        env:
+          CI: true
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t rag-assistant:ci-test .

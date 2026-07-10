@@ -3,8 +3,8 @@ Configuration for the RAG assistant.
 All settings use RAG_ prefix as environment variables.
 """
 
-from pydantic_settings import BaseSettings
 from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -16,21 +16,47 @@ class Settings(BaseSettings):
 
     # --- Ollama (local LLM) ---
     llm_backend: str = Field(default="anthropic", description="'anthropic' or 'ollama'")
-    ollama_base_url: str = Field(default="http://localhost:11434", description="Ollama server URL")
+    ollama_base_url: str = Field(default="http://localhost:11434", description="Primary Ollama server URL")
+    ollama_extra_nodes: str = Field(
+        default="", description="Comma-separated extra Ollama URLs for load balancing (e.g. http://192.168.1.50:11434)"
+    )
     ollama_model: str = Field(default="qwen2.5-coder:14b", description="Default Ollama chat model")
     ollama_memory_model: str = Field(default="llama3.2:3b", description="Fast model for memory extraction")
+    ollama_num_ctx: int = Field(
+        default=16384,
+        description="Context window (num_ctx) for Ollama calls — Ollama's 4k default silently truncates RAG prompts",
+    )
+    ollama_keep_alive: str = Field(
+        default="1h", description="How long Ollama keeps the chat model loaded after a call (e.g. '5m', '1h')"
+    )
 
     # --- Embeddings ---
     embedding_model: str = Field(default="all-MiniLM-L6-v2")
     embedding_dimension: int = Field(default=384)
+    embedding_backend: str = Field(
+        default="torch", description="SentenceTransformer backend: 'torch' or 'onnx' (2-3x faster on CPU)"
+    )
+    # Recommended upgrade: Alibaba-NLP/gte-modernbert-base (768-dim, 8192-token window).
+    # Changing the model requires re-embedding: run scripts/migrate_embeddings.py.
+
+    # --- Reranker ---
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description="Reranker model ID; e.g. Alibaba-NLP/gte-reranker-modernbert-base or answerdotai/answerai-colbert-small-v1",
+    )
+    reranker_type: str = Field(
+        default="cross-encoder", description="'cross-encoder' (sigmoid scores) or 'colbert' (MaxSim via rerankers pkg)"
+    )
 
     # --- Vector Store ---
     chroma_persist_dir: str = Field(default="./data/chroma_db")
     collection_name: str = Field(default="tech_docs")
 
     # --- Chunking ---
-    chunk_size: int = Field(default=512)
-    chunk_overlap: int = Field(default=64)
+    # all-MiniLM-L6-v2 truncates at 256 wordpieces, so chunks must stay under that
+    # (incl. the ~25-token breadcrumb prepended at ingest). Re-ingest after changing.
+    chunk_size: int = Field(default=224)
+    chunk_overlap: int = Field(default=32)
     min_chunk_size: int = Field(default=10)
 
     # --- Retrieval ---
@@ -42,21 +68,56 @@ class Settings(BaseSettings):
     bm25_weight: float = Field(default=0.3)
     vector_weight: float = Field(default=0.7)
 
+    # --- Query cache ---
+    query_cache_ttl_hours: float = Field(
+        default=24.0, description="Semantic query-cache entries older than this are ignored (0 disables TTL)"
+    )
+
     # --- SPLADE (learned sparse retrieval) ---
-    splade_enabled: bool = Field(default=False, description="Build SPLADE index at startup (requires sentence-transformers>=3.0)")
-    splade_model: str = Field(default="prithivida/Splade_PP_en_v1", description="HuggingFace model ID for SPLADE (must be publicly accessible)")
+    splade_enabled: bool = Field(
+        default=False, description="Build SPLADE index at startup (requires sentence-transformers>=3.0)"
+    )
+    splade_model: str = Field(
+        default="prithivida/Splade_PP_en_v1",
+        description="HuggingFace model ID for SPLADE (must be publicly accessible)",
+    )
 
     # --- Agent ---
     agent_max_steps: int = Field(default=5)
 
+    # --- Knowledge graph ---
+    graph_extraction: str = Field(
+        default="ner",
+        description="Graph entity extraction: 'ner' (spaCy+regex, fast) | 'llm' (legacy) | 'hybrid' (ner + LLM for hub entities)",
+    )
+
+    # --- Contextual retrieval (Anthropic-style chunk situating) ---
+    contextual_enrich: bool = Field(
+        default=False, description="LLM-situate each chunk at ingest (slow on CPU Ollama — opt-in)"
+    )
+
+    # --- Parent expansion (small-to-big) ---
+    parent_expand_budget: int = Field(default=800, description="Token budget for post-rerank parent expansion")
+
+    # --- Gap research loop ---
+    research_max_iters: int = Field(default=2, description="Max web-augment iterations per approved gap")
+
+    # --- Learned router ---
+    router_model_path: str = Field(default="./data/router.joblib")
+
     # --- Memory (token-optimized) ---
     memory_enabled: bool = Field(default=True, description="Enable long-term memory")
     memory_top_k: int = Field(default=5, description="Memories to retrieve per query")
-    memory_extraction_model: str = Field(default="claude-haiku-3-5-20241022", description="Anthropic model for extraction (unused when backend=ollama)")
+    memory_extraction_model: str = Field(
+        default="claude-haiku-3-5-20241022", description="Anthropic model for extraction (unused when backend=ollama)"
+    )
     memory_auto_extract: bool = Field(default=True, description="Auto-extract after turns")
     memory_auto_summarize: bool = Field(default=True, description="Auto-summarize sessions")
     memory_extract_interval: int = Field(default=3, description="Extract every N turns")
     memory_min_answer_length: int = Field(default=100, description="Skip extraction if answer shorter")
+    memory_max_fragments: int = Field(default=500, description="Soft cap; maintenance archives lowest scorers above it")
+    memory_maintenance_interval_s: int = Field(default=600, description="Idle-maintenance sweep period (seconds)")
+    memory_idle_threshold_s: int = Field(default=1800, description="User idle time before maintenance may run")
 
     # --- Token Optimization ---
     max_context_chunks: int = Field(default=5, description="Max chunks sent to LLM")
@@ -76,6 +137,12 @@ class Settings(BaseSettings):
     # --- Auth ---
     jwt_secret: str = Field(default="change-me-in-production-please")
     jwt_expiry_hours: int = Field(default=72)
+
+    # --- CORS ---
+    allowed_origins: list[str] = Field(
+        default=["http://localhost:3000", "http://127.0.0.1:3000"],
+        description="Allowed CORS origins (set to ['*'] only for development)",
+    )
 
     # --- Database ---
     database_path: str = Field(default="./data/rag_assistant.db")

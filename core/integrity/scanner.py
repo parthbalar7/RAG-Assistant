@@ -20,14 +20,14 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from config import settings
-
 
 # ---------------------------
 # Data models (plain dicts externally)
 # ---------------------------
+
 
 @dataclass
 class Evidence:
@@ -35,7 +35,7 @@ class Evidence:
     lines: str
     snippet: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"file": self.file, "lines": self.lines, "snippet": self.snippet}
 
 
@@ -45,10 +45,10 @@ class Issue:
     severity: str  # low | medium | high | critical
     title: str
     description: str
-    evidence: List[Evidence]
+    evidence: list[Evidence]
     recommendation: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": self.type,
             "severity": self.severity,
@@ -63,6 +63,7 @@ class Issue:
 # Corpus helpers
 # ---------------------------
 
+
 def _hash_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -72,7 +73,7 @@ def _safe_snippet(text: str, max_len: int = 240) -> str:
     return (t[: max_len - 1] + "…") if len(t) > max_len else t
 
 
-def _load_corpus(store, max_chunks: int) -> List[Dict[str, Any]]:
+def _load_corpus(store, max_chunks: int) -> list[dict[str, Any]]:
     """
     Returns list of {"content": str, "metadata": dict}
     Sampling strategy:
@@ -92,14 +93,14 @@ def _load_corpus(store, max_chunks: int) -> List[Dict[str, Any]]:
         return items
 
     # group by file
-    by_file: Dict[str, List[Dict[str, Any]]] = {}
+    by_file: dict[str, list[dict[str, Any]]] = {}
     for it in items:
         p = (it["metadata"] or {}).get("document_path", "") or "unknown"
         by_file.setdefault(p, []).append(it)
 
     files = sorted(by_file.keys())
     per_file = max(1, max_chunks // max(1, len(files)))
-    sampled: List[Dict[str, Any]] = []
+    sampled: list[dict[str, Any]] = []
     for fp in files:
         chunk_list = by_file[fp]
         # deterministic spread
@@ -139,12 +140,12 @@ def _norm_key(k: str) -> str:
     return " ".join(parts[:8])
 
 
-def _extract_claims(text: str) -> List[Tuple[str, str]]:
+def _extract_claims(text: str) -> list[tuple[str, str]]:
     """
     Returns list of (key, value) pairs.
     Values are normalized numeric+unit when present to increase detectability.
     """
-    claims: List[Tuple[str, str]] = []
+    claims: list[tuple[str, str]] = []
 
     for m in _KEYVAL.finditer(text):
         key = _norm_key(m.group("key"))
@@ -180,22 +181,23 @@ def _extract_claims(text: str) -> List[Tuple[str, str]]:
 # Issue detectors
 # ---------------------------
 
-def detect_contradictions(corpus: List[Dict[str, Any]], max_examples: int = 3) -> List[Issue]:
+
+def detect_contradictions(corpus: list[dict[str, Any]], max_examples: int = 3) -> list[Issue]:
     """
     Detects conflicting claims across documents.
     """
-    buckets: Dict[str, Dict[str, List[Evidence]]] = {}  # key -> value -> evidences
+    buckets: dict[str, dict[str, list[Evidence]]] = {}  # key -> value -> evidences
 
     for it in corpus:
         text = it["content"] or ""
         meta = it["metadata"] or {}
         fp = meta.get("document_path", "") or "unknown"
-        lines = f"{meta.get('start_line','?')}-{meta.get('end_line','?')}"
+        lines = f"{meta.get('start_line', '?')}-{meta.get('end_line', '?')}"
         for k, v in _extract_claims(text):
             ev = Evidence(file=fp, lines=lines, snippet=_safe_snippet(text))
             buckets.setdefault(k, {}).setdefault(v, []).append(ev)
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
     for k, values in buckets.items():
         # Need at least 2 distinct values from 2+ evidences to be meaningful
         if len(values) < 2:
@@ -205,31 +207,37 @@ def detect_contradictions(corpus: List[Dict[str, Any]], max_examples: int = 3) -
         distinct = list(values.keys())
         # score severity
         sev = "medium"
-        if any(v.endswith(("ms", "s", "sec", "seconds", "min", "mins", "hours", "days", "%")) or v.replace(".", "", 1).isdigit() for v in distinct):
+        if any(
+            v.endswith(("ms", "s", "sec", "seconds", "min", "mins", "hours", "days", "%"))
+            or v.replace(".", "", 1).isdigit()
+            for v in distinct
+        ):
             sev = "high"
         if any(v in ("must", "must_not", "should", "should_not") for v in distinct):
             sev = "high"
 
-        evs: List[Evidence] = []
+        evs: list[Evidence] = []
         for v in distinct[:2]:
             evs.extend(values[v][:1])
         title = f"Conflicting statements detected: “{k}”"
         description = f"Multiple values/policies found for the same topic ({', '.join(distinct[:4])}). This can cause incorrect guidance and operational risk."
         recommendation = "Consolidate this topic into a single source of truth (one policy/runbook section), and update or deprecate conflicting documents."
-        issues.append(Issue(
-            type="contradiction",
-            severity=sev,
-            title=title,
-            description=description,
-            evidence=evs[:max_examples],
-            recommendation=recommendation,
-        ))
+        issues.append(
+            Issue(
+                type="contradiction",
+                severity=sev,
+                title=title,
+                description=description,
+                evidence=evs[:max_examples],
+                recommendation=recommendation,
+            )
+        )
 
     # cap
     return issues[: settings.integrity_max_issues]
 
 
-def detect_blind_spots(corpus: List[Dict[str, Any]]) -> List[Issue]:
+def detect_blind_spots(corpus: list[dict[str, Any]]) -> list[Issue]:
     """
     Detect missing essential topics across the knowledge base.
     """
@@ -247,22 +255,26 @@ def detect_blind_spots(corpus: List[Dict[str, Any]]) -> List[Issue]:
         ("encryption", ["encryption", "tls", "https", "at rest"]),
     ]
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
     for name, needles in required_topics:
         if not any(n in full_text for n in needles):
-            issues.append(Issue(
-                type="blind_spot",
-                severity="high" if name in ("disaster recovery", "backups & restore", "monitoring & alerting") else "medium",
-                title=f"Missing documentation: {name}",
-                description=f"The knowledge base does not appear to describe {name}. Teams may be unprepared during incidents or audits.",
-                evidence=[],
-                recommendation=f"Add a dedicated section/runbook covering {name} with owners, procedures, and validation steps.",
-            ))
+            issues.append(
+                Issue(
+                    type="blind_spot",
+                    severity="high"
+                    if name in ("disaster recovery", "backups & restore", "monitoring & alerting")
+                    else "medium",
+                    title=f"Missing documentation: {name}",
+                    description=f"The knowledge base does not appear to describe {name}. Teams may be unprepared during incidents or audits.",
+                    evidence=[],
+                    recommendation=f"Add a dedicated section/runbook covering {name} with owners, procedures, and validation steps.",
+                )
+            )
 
     return issues[: settings.integrity_max_issues]
 
 
-def detect_resilience_gaps(corpus: List[Dict[str, Any]]) -> List[Issue]:
+def detect_resilience_gaps(corpus: list[dict[str, Any]]) -> list[Issue]:
     """
     Detect likely resilience gaps based on dependency mentions without corresponding mitigation language.
     """
@@ -273,29 +285,44 @@ def detect_resilience_gaps(corpus: List[Dict[str, Any]]) -> List[Issue]:
         "queue": ["kafka", "rabbitmq", "sqs", "queue"],
         "object storage": ["s3", "gcs", "blob storage", "object storage"],
     }
-    mitigations = ["replica", "replication", "cluster", "multi-az", "failover", "fallback", "degraded", "circuit breaker", "retry", "timeout", "rate limit"]
+    mitigations = [
+        "replica",
+        "replication",
+        "cluster",
+        "multi-az",
+        "failover",
+        "fallback",
+        "degraded",
+        "circuit breaker",
+        "retry",
+        "timeout",
+        "rate limit",
+    ]
 
     # Build per-dependency presence
     text_all = "\n".join((it.get("content") or "") for it in corpus).lower()
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
     for dep_name, needles in dependencies.items():
-        if any(n in text_all for n in needles):
-            # expect mitigations
-            if not any(m in text_all for m in mitigations):
-                issues.append(Issue(
+        # a mentioned dependency is expected to come with mitigation details
+        if any(n in text_all for n in needles) and not any(m in text_all for m in mitigations):
+            issues.append(
+                Issue(
                     type="resilience_gap",
                     severity="high" if dep_name in ("database", "cache") else "medium",
                     title=f"Resilience gap: {dep_name} mentioned without mitigation details",
                     description=f"The documents reference {dep_name} components, but do not clearly describe redundancy/failover/timeouts/retries. This increases incident risk.",
                     evidence=[],
                     recommendation=f"Document {dep_name} resilience strategy (timeouts, retries, failover, backup/restore, capacity limits) and link it from the main runbook.",
-                ))
+                )
+            )
 
     return issues[: settings.integrity_max_issues]
 
 
-def detect_drift(store, corpus: List[Dict[str, Any]], previous_fingerprints: Optional[Dict[str, str]] = None) -> Tuple[List[Issue], Dict[str, str]]:
+def detect_drift(
+    store, corpus: list[dict[str, Any]], previous_fingerprints: dict[str, str] | None = None
+) -> tuple[list[Issue], dict[str, str]]:
     """
     Detect drift by comparing current per-file fingerprints to previous fingerprints.
 
@@ -304,12 +331,12 @@ def detect_drift(store, corpus: List[Dict[str, Any]], previous_fingerprints: Opt
     previous_fingerprints = previous_fingerprints or {}
 
     # build per-file stable text
-    by_file: Dict[str, List[Dict[str, Any]]] = {}
+    by_file: dict[str, list[dict[str, Any]]] = {}
     for it in corpus:
         fp = (it.get("metadata") or {}).get("document_path", "") or "unknown"
         by_file.setdefault(fp, []).append(it)
 
-    current: Dict[str, str] = {}
+    current: dict[str, str] = {}
     for fp, items in by_file.items():
         # stable sort by start_line if possible
         def _k(x):
@@ -318,23 +345,26 @@ def detect_drift(store, corpus: List[Dict[str, Any]], previous_fingerprints: Opt
                 return int(m.get("start_line") or 0)
             except Exception:
                 return 0
+
         items_sorted = sorted(items, key=_k)
         sample_text = "\n".join((x.get("content") or "")[:400] for x in items_sorted[:10])
         payload = f"{fp}|{len(items_sorted)}|{sample_text}"
         current[fp] = _hash_text(payload)
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
     for fp, h in current.items():
         prev = previous_fingerprints.get(fp)
         if prev and prev != h:
-            issues.append(Issue(
-                type="drift",
-                severity="medium",
-                title=f"Documentation drift detected: {fp}",
-                description="This document's content changed significantly since the last integrity scan. Ensure dependent runbooks/policies remain consistent.",
-                evidence=[Evidence(file=fp, lines="—", snippet="Fingerprint changed since last scan")],
-                recommendation="Review recent updates, validate downstream references, and re-run contradiction checks for related documents.",
-            ))
+            issues.append(
+                Issue(
+                    type="drift",
+                    severity="medium",
+                    title=f"Documentation drift detected: {fp}",
+                    description="This document's content changed significantly since the last integrity scan. Ensure dependent runbooks/policies remain consistent.",
+                    evidence=[Evidence(file=fp, lines="—", snippet="Fingerprint changed since last scan")],
+                    recommendation="Review recent updates, validate downstream references, and re-run contradiction checks for related documents.",
+                )
+            )
 
     return issues[: settings.integrity_max_issues], current
 
@@ -343,7 +373,8 @@ def detect_drift(store, corpus: List[Dict[str, Any]], previous_fingerprints: Opt
 # Scoring
 # ---------------------------
 
-def score_health(issues: List[Issue]) -> Dict[str, Any]:
+
+def score_health(issues: list[Issue]) -> dict[str, Any]:
     weights = {
         "critical": 18,
         "high": 12,
@@ -361,7 +392,7 @@ def score_health(issues: List[Issue]) -> Dict[str, Any]:
     return {"score": score, "band": band, "counts": by_type, "penalty": penalty}
 
 
-def build_recommendations(issues: List[Issue], max_items: int = 6) -> List[str]:
+def build_recommendations(issues: list[Issue], max_items: int = 6) -> list[str]:
     recs = []
     seen = set()
     for i in issues:
@@ -380,12 +411,13 @@ def build_recommendations(issues: List[Issue], max_items: int = 6) -> List[str]:
 # Public API
 # ---------------------------
 
-def run_integrity_scan(store, previous_fingerprints: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+
+def run_integrity_scan(store, previous_fingerprints: dict[str, str] | None = None) -> dict[str, Any]:
     started = time.time()
     max_chunks = getattr(settings, "integrity_scan_max_chunks", 1200)
     corpus = _load_corpus(store, max_chunks=max_chunks)
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
     issues.extend(detect_contradictions(corpus))
     issues.extend(detect_blind_spots(corpus))
     issues.extend(detect_resilience_gaps(corpus))

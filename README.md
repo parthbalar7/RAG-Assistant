@@ -28,8 +28,7 @@ RAGv2/
 │   ├── multimodal.py          # PDF + image extraction
 │   ├── tree_indexer.py        # PDF → hierarchical tree index (local engine)
 │   ├── tree_search.py         # LLM reasoning-based tree retrieval
-│   ├── pageindex_retriever.py # Local PageIndex orchestrator
-│   └── evaluation.py          # RAG quality eval
+│   └── pageindex_retriever.py # Local PageIndex orchestrator
 │
 ├── api/                       # FastAPI server
 │   ├── __init__.py            # Package init
@@ -47,8 +46,8 @@ RAGv2/
 │       └── App.js             # Main React app
 │
 ├── tests/
-│   ├── __init__.py            # Package init
-│   └── eval_cases.json        # Test cases
+│   ├── eval/golden.jsonl      # Retrieval eval golden set (scripts/eval_retrieval.py)
+│   └── test_*.py              # Backend test suite
 │
 └── data/                      # Created at runtime (gitignored)
     ├── chroma_db/             # Vector store
@@ -272,7 +271,58 @@ All settings use `RAG_` prefix in `.env`:
 | `RAG_AGENT_MAX_STEPS` | `5` | Agent steps |
 | `RAG_PAGEINDEX_ENABLED` | `false` | Enable local tree-indexed PDF retrieval |
 | `RAG_JWT_SECRET` | `change-me` | Auth secret |
-| `RAG_CHUNK_SIZE` | `512` | Chunk tokens |
+| `RAG_CHUNK_SIZE` | `224` | Chunk tokens |
+
+### Performance env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAG_OLLAMA_NUM_CTX` | `16384` | Ollama context window (`num_ctx`). Ollama's own default is 4k and it silently truncates anything longer — keep this large enough for system prompt + history + memory + retrieved chunks |
+| `RAG_OLLAMA_KEEP_ALIVE` | `1h` | How long Ollama keeps the model resident after a request; avoids a full cold reload after every idle pause |
+| `RAG_EMBEDDING_BACKEND` | `torch` | Set to `onnx` for a 2-3x CPU speedup on all embedding paths (queries, ingest, HyDE, memory); falls back to torch if ONNX is unavailable |
+| `RAG_QUERY_CACHE_TTL_HOURS` | `24` | Semantic query-cache entry lifetime in hours; `0` disables expiry |
+
+Host-side (set on the machine running Ollama, not in `.env`): `OLLAMA_KV_CACHE_TYPE=q8_0` quantizes the KV cache to roughly halve its RAM cost, which is what makes the 16k context window affordable on CPU.
+
+> **Note:** the default chunk size changed from 512 to 224 tokens (all-MiniLM-L6-v2 truncates input at 256 wordpiece tokens, so larger chunks were silently cut in half). Existing indexes still contain old-boundary chunks — clear the index and re-ingest your documents to pick up the new chunking.
+
+### Tier 2 upgrades
+
+**Embedding model upgrade path.** The default stays `all-MiniLM-L6-v2` (384-dim, fastest on CPU). Set `RAG_EMBEDDING_MODEL=Alibaba-NLP/gte-modernbert-base` (768-dim, 8192-token context, stronger on code) to opt in — then re-embed, because stored vectors keep the old dimension and the store refuses to start on a mismatch:
+
+```bash
+python scripts/migrate_embeddings.py            # re-embeds every ChromaDB collection in batches
+python scripts/migrate_embeddings.py --dry-run  # show what would change first
+```
+
+**Configurable reranker.** `RAG_RERANKER_MODEL` (default `cross-encoder/ms-marco-MiniLM-L-6-v2`) and `RAG_RERANKER_TYPE` (`cross-encoder` | `colbert`). Upgrades: `Alibaba-NLP/gte-reranker-modernbert-base` (cross-encoder, 8k context, ~5-10x slower) or `answerdotai/answerai-colbert-small-v1` with `RAG_RERANKER_TYPE=colbert` (MaxSim via the `rerankers` package, best quality per CPU-ms). Scores are normalized into (0,1) for every backend; load failures fall back to the default cross-encoder.
+
+**LLM-free graph extraction.** `RAG_GRAPH_EXTRACTION=ner` (the default) builds the knowledge graph with spaCy NER plus code-identifier regexes instead of per-chunk LLM calls — minutes instead of hours on CPU. `llm` restores the old behavior; `hybrid` adds an LLM pass over only the top high-degree entities. Requires the spaCy model (preinstalled in the Docker image):
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
+Louvain community detection stamps each node with a theme id — the Graph panel colors nodes by community and `GET /api/graph/communities` lists themes with lazy LLM summaries.
+
+**Contextual enrichment.** `RAG_CONTEXTUAL_ENRICH=true` situates each chunk within its document via a small-model LLM call at ingest (Anthropic-style contextual retrieval). Opt-in: costs roughly 2-6s per chunk on CPU Ollama.
+
+**Parent context expansion.** Settings → Retrieval → "Parent context expansion" (per-query toggle, WS flag `use_parent_expand`) stitches neighboring chunks around each reranked winner up to `RAG_PARENT_EXPAND_BUDGET` tokens (default 800) — rank small chunks precisely, hand the LLM bigger context.
+
+**Learned query router.** Train the 3-way complexity classifier (`direct` / `single` / `multi`) that replaces the keyword heuristics — `direct` skips retrieval entirely, so you can chat before indexing anything:
+
+```bash
+python scripts/train_router.py --from-db                              # bootstrap from your query history
+python scripts/train_router.py --csv data/router_labels.csv --from-db # add hand labels
+```
+
+The model is saved to `RAG_ROUTER_MODEL_PATH` (default `./data/router.joblib`); when the file is missing the heuristic router is used.
+
+**Eval harness.** `make eval` runs deterministic retrieval metrics (hit-rate@5 / MRR per toggle combination) against `tests/eval/golden.jsonl` in seconds; `make eval-answers` adds judge-based DeepEval Faithfulness / ContextualRelevancy scores (comparative only — never a CI gate).
+
+**Memory maintenance.** An idle-time background job consolidates, prunes, and distills long-term memory: `RAG_MEMORY_MAX_FRAGMENTS` (default `500`, soft cap — the lowest importance x recency x usage scorers are archived above it), `RAG_MEMORY_MAINTENANCE_INTERVAL_S` (default `600`, sweep period), `RAG_MEMORY_IDLE_THRESHOLD_S` (default `1800`, how long a user must be idle before maintenance runs).
+
+**Bounded web research loop.** When you approve a gap-driven web search, the backend verifies the gap actually closed, refines the search query up to `RAG_RESEARCH_MAX_ITERS` times (default `2`, surfaced as "Refining web search" toasts), and streams a regenerated answer automatically — no need to re-ask.
 
 ## Supported File Types
 

@@ -38,7 +38,7 @@ def extract_pdf(filepath):
             page = doc[page_num]
             text = page.get_text("text")
             if text.strip():
-                all_text.append("--- Page {} ---\n{}".format(page_num + 1, text))
+                all_text.append(f"--- Page {page_num + 1} ---\n{text}")
 
             image_list = page.get_images(full=True)
             for img_idx, img_info in enumerate(image_list[:3]):
@@ -48,14 +48,16 @@ def extract_pdf(filepath):
                     if base_image and base_image["image"]:
                         img_bytes = base_image["image"]
                         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-                        images.append({
-                            "data": img_b64,
-                            "page": page_num + 1,
-                            "mime_type": "image/{}".format(base_image.get("ext", "png")),
-                            "description": "Image from page {}".format(page_num + 1),
-                        })
+                        images.append(
+                            {
+                                "data": img_b64,
+                                "page": page_num + 1,
+                                "mime_type": "image/{}".format(base_image.get("ext", "png")),
+                                "description": f"Image from page {page_num + 1}",
+                            }
+                        )
                 except Exception as e:
-                    logger.debug("Could not extract image {} from page {}: {}".format(img_idx, page_num + 1, e))
+                    logger.debug(f"Could not extract image {img_idx} from page {page_num + 1}: {e}")
 
         doc.close()
 
@@ -71,7 +73,7 @@ def extract_pdf(filepath):
         )
 
     except Exception as e:
-        logger.error("PDF extraction failed for {}: {}".format(filepath, e))
+        logger.error(f"PDF extraction failed for {filepath}: {e}")
         return None
 
 
@@ -89,11 +91,12 @@ def extract_image_text(filepath):
         ocr_text = ""
         try:
             import pytesseract
+
             ocr_text = pytesseract.image_to_string(img)
         except ImportError:
             ocr_text = "[Image file - install Tesseract OCR for text extraction]"
         except Exception as e:
-            logger.warning("OCR failed: {}".format(e))
+            logger.warning(f"OCR failed: {e}")
             ocr_text = "[Image - OCR unavailable]"
 
         buf = io.BytesIO()
@@ -110,14 +113,14 @@ def extract_image_text(filepath):
             metadata={
                 "type": "image",
                 "format": img_format,
-                "size": "{}x{}".format(img.width, img.height),
+                "size": f"{img.width}x{img.height}",
                 "has_ocr": bool(ocr_text.strip()),
             },
             source_path=filepath,
         )
 
     except Exception as e:
-        logger.error("Image extraction failed for {}: {}".format(filepath, e))
+        logger.error(f"Image extraction failed for {filepath}: {e}")
         return None
 
 

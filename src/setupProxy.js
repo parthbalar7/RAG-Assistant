@@ -10,7 +10,7 @@ module.exports = function (app) {
       target: BACKEND,
       ws: true,
       changeOrigin: true,
-    })
+    }),
   );
 
   // HTTP API proxy (replaces the "proxy" field in package.json)
@@ -19,6 +19,6 @@ module.exports = function (app) {
     createProxyMiddleware({
       target: BACKEND,
       changeOrigin: true,
-    })
+    }),
   );
 };

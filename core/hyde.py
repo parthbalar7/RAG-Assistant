@@ -15,7 +15,6 @@ Labels", arXiv 2212.10496.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,7 @@ _HYDE_SYSTEM = (
 )
 
 
-def generate_hypothetical_doc(query: str) -> Optional[str]:
+def generate_hypothetical_doc(query: str) -> str | None:
     """
     Use the active LLM (Anthropic or Ollama) to generate a hypothetical answer
     document for the given query.
@@ -46,15 +45,9 @@ def generate_hypothetical_doc(query: str) -> Optional[str]:
             stream=False,
         )
         if doc and len(doc.strip()) > 20:
-            logger.info(
-                "HyDE: generated hypothetical doc ({} chars) for: {}".format(
-                    len(doc), query[:60]
-                )
-            )
+            logger.info(f"HyDE: generated hypothetical doc ({len(doc)} chars) for: {query[:60]}")
             return doc.strip()
     except Exception as e:
-        logger.warning(
-            "HyDE generation failed, falling back to raw query: {}".format(e)
-        )
+        logger.warning(f"HyDE generation failed, falling back to raw query: {e}")
 
     return None
