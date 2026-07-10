@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     bm25_weight: float = Field(default=0.3)
     vector_weight: float = Field(default=0.7)
 
+    # --- Progressive indexing ---
+    ingest_skip_unchanged: bool = Field(
+        default=True, description="Skip re-embedding files whose content hash is unchanged since last ingest"
+    )
+    sparse_rebuild_debounce_s: float = Field(
+        default=2.0,
+        description="Rebuild BM25/SPLADE in a background thread, debounced; 0 restores synchronous rebuilds",
+    )
+    graph_incremental: bool = Field(
+        default=True, description="Merge newly ingested chunks into an existing knowledge graph (ner mode only)"
+    )
+
     # --- Query cache ---
     query_cache_ttl_hours: float = Field(
         default=24.0, description="Semantic query-cache entries older than this are ignored (0 disables TTL)"

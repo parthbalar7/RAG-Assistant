@@ -20,9 +20,9 @@ function AddMemoryModal({ onClose, onAdd }) {
             minHeight: 80,
             padding: 12,
             borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--border-neon)',
-            background: 'var(--bg-surface)',
-            color: 'var(--text-primary)',
+            border: '1px solid var(--border)',
+            background: 'var(--surface-2)',
+            color: 'var(--text-1)',
             fontSize: 13,
             fontFamily: 'var(--font-body)',
             resize: 'vertical',
@@ -43,7 +43,7 @@ function AddMemoryModal({ onClose, onAdd }) {
           ))}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Importance:</span>
+          <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Importance:</span>
           <input
             type="range"
             min="0"
@@ -51,9 +51,9 @@ function AddMemoryModal({ onClose, onAdd }) {
             step="0.1"
             value={importance}
             onChange={(e) => setImportance(parseFloat(e.target.value))}
-            style={{ flex: 1, accentColor: 'var(--neon-cyan)' }}
+            style={{ flex: 1, accentColor: 'var(--accent)' }}
           />
-          <span style={{ fontSize: 11, color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', minWidth: 30 }}>
+          <span style={{ fontSize: 11, color: 'var(--accent)', fontFamily: 'var(--font-mono)', minWidth: 30 }}>
             {(importance * 100).toFixed(0)}%
           </span>
         </div>

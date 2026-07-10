@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -12,7 +13,7 @@ from api.auth import require_auth
 from api.dependencies import get_user_store
 from api.models import IngestReq
 from config import settings
-from core.ingestion import ingest_directory
+from core.ingestion import chunk_document, file_hash_for, load_documents
 from core.query_cache import invalidate_user_cache
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ router = APIRouter(prefix="/api", tags=["ingest"])
 _SITUATE_TIMEOUT_S = 30
 _ENRICH_LOG_EVERY = 25
 _ENRICH_MAX_CONSECUTIVE_TIMEOUTS = 3
+_SKIPPED_FILES_RESPONSE_CAP = 50
 
 
 def _contextual_enrich(chunks, base_dir, override=None):
@@ -90,12 +92,109 @@ def _contextual_enrich(chunks, base_dir, override=None):
         logger.warning("Contextual enrichment skipped after error: %s", e)
 
 
+def _partition_unchanged(store, docs):
+    """Split loaded documents into (changed, skipped_paths) by comparing each file's
+    content hash against the file_hash stored in the collection's chunk metadata.
+
+    Returns everything as changed when skip-unchanged is disabled, the collection is
+    empty, or the lookup fails — the worst case is a redundant re-embed, never a miss."""
+    if not settings.ingest_skip_unchanged or not docs or store.count == 0:
+        return list(docs), []
+
+    stored = {}
+    try:
+        paths = sorted({d.filepath for d in docs})
+        raw = store.collection.get(where={"document_path": {"$in": paths}}, include=["metadatas"])
+        for meta in raw.get("metadatas") or []:
+            meta = meta or {}
+            path = meta.get("document_path")
+            if path and path not in stored:
+                stored[path] = meta.get("file_hash", "")
+    except Exception as e:
+        logger.warning(f"Skip-unchanged hash lookup failed (re-indexing everything): {e}")
+        return list(docs), []
+
+    changed, skipped = [], []
+    for d in docs:
+        # file_hash_for folds in the chunking fingerprint: a chunk_size/enrichment
+        # config change must re-chunk even byte-identical files.
+        if d.content_hash and stored.get(d.filepath) == file_hash_for(d):
+            skipped.append(d.filepath)
+        else:
+            changed.append(d)
+    return changed, sorted(skipped)
+
+
+def _incremental_graph_update(uid, chunks):
+    """Merge freshly ingested chunks into an existing knowledge graph on a daemon
+    thread so ingest latency is unaffected. Strictly best-effort: never creates a
+    graph, and any failure (including the API not existing yet) logs and continues."""
+    if not settings.graph_incremental or not chunks:
+        return
+    payload = [
+        (
+            c.chunk_id,
+            c.content,
+            {
+                **{k: v for k, v in c.metadata.items() if isinstance(v, (str, int, float, bool))},
+                "document_path": c.document_path,
+                "language": c.language,
+                "start_line": c.start_line,
+                "end_line": c.end_line,
+                "chunk_type": c.chunk_type,
+                "source": c.display_source,
+            },
+        )
+        for c in chunks
+    ]
+
+    def _run():
+        try:
+            from core.knowledge_graph import get_user_graph
+
+            kg = get_user_graph(uid)
+            if kg.graph.number_of_nodes() == 0:
+                return  # never force graph creation — full builds stay explicit
+            kg.update_from_chunks(payload)
+        except (ImportError, AttributeError) as e:
+            logger.debug(f"Incremental graph API unavailable, skipping: {e}")
+        except Exception as e:
+            logger.warning(f"Incremental graph update failed (continuing): {e}")
+
+    threading.Thread(target=_run, name=f"kg-incremental-{uid}", daemon=True).start()
+
+
+def _ingest_docs(uid, store, docs, base_dir, contextual_override=None):
+    """Shared skip-unchanged -> chunk -> enrich -> index -> graph-hook pipeline for
+    /ingest and /upload. Returns (chunks_indexed, processed_paths, skipped_paths)."""
+    changed, skipped = _partition_unchanged(store, docs)
+    chunks = []
+    for doc in changed:
+        chunks.extend(chunk_document(doc))
+
+    added = 0
+    if chunks:
+        _contextual_enrich(chunks, base_dir, override=contextual_override)
+        added = store.add_chunks(chunks)
+        invalidate_user_cache(uid)
+        _incremental_graph_update(uid, chunks)
+
+    processed = sorted({c.document_path for c in chunks})
+    logger.info(
+        "Ingest summary: %d files processed, %d skipped (unchanged), %d chunks indexed",
+        len(processed),
+        len(skipped),
+        added,
+    )
+    return added, processed, skipped
+
+
 @router.post("/ingest")
 def ingest(req: IngestReq, user=Depends(require_auth)):
     uid = user["id"]
     s = get_user_store(uid)
-    chunks = ingest_directory(req.directory)
-    if not chunks:
+    docs = load_documents(req.directory)
+    if not docs:
         p = Path(req.directory)
         if not p.exists():
             raise HTTPException(400, f"Directory not found: {req.directory}")
@@ -110,14 +209,14 @@ def ingest(req: IngestReq, user=Depends(require_auth)):
             f"No supported documents found in {req.directory}. Found {file_count} files with extensions: "
             f"{', '.join(sorted(exts)[:20]) or 'none'}. Supported matches: {', '.join(sorted(supported_found)) or 'none'}",
         )
-    _contextual_enrich(chunks, req.directory, override=req.contextual)
-    added = s.add_chunks(chunks)
-    invalidate_user_cache(uid)
+    added, processed, skipped = _ingest_docs(uid, s, docs, req.directory, contextual_override=req.contextual)
     return {
         "chunks_indexed": added,
-        "documents_processed": len(set(c.document_path for c in chunks)),
+        "documents_processed": len(processed),
         "collection_total": s.count,
-        "files": sorted(set(c.document_path for c in chunks)),
+        "files": processed,
+        "files_processed": processed,
+        "files_skipped": {"count": len(skipped), "files": skipped[:_SKIPPED_FILES_RESPONSE_CAP]},
     }
 
 
@@ -125,7 +224,6 @@ def ingest(req: IngestReq, user=Depends(require_auth)):
 async def upload(files: list[UploadFile] = File(...), user=Depends(require_auth)):
     uid = user["id"]
     s = await asyncio.to_thread(get_user_store, uid)
-    total, processed = 0, []
     with tempfile.TemporaryDirectory() as tmp:
         for f in files:
             safe_name = f.filename.replace("\\", "/")
@@ -137,17 +235,14 @@ async def upload(files: list[UploadFile] = File(...), user=Depends(require_auth)
                     if not chunk:
                         break
                     fh.write(chunk)
-        chunks = await asyncio.to_thread(ingest_directory, tmp)
-        if chunks:
-            await asyncio.to_thread(_contextual_enrich, chunks, tmp)
-            total = await asyncio.to_thread(s.add_chunks, chunks)
-            processed = sorted(set(c.document_path for c in chunks))
-            invalidate_user_cache(uid)
+        docs = await asyncio.to_thread(load_documents, tmp)
+        added, processed, skipped = await asyncio.to_thread(_ingest_docs, uid, s, docs, tmp)
     return {
-        "chunks_indexed": total,
+        "chunks_indexed": added,
         "files_processed": processed,
         "documents_processed": len(processed),
         "collection_total": s.count,
+        "files_skipped": {"count": len(skipped), "files": skipped[:_SKIPPED_FILES_RESPONSE_CAP]},
     }
 
 

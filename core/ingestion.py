@@ -245,6 +245,28 @@ class Document:
     filepath: str
     language: str
     metadata: dict = field(default_factory=dict)
+    content_hash: str = ""
+
+
+def compute_content_hash(content):
+    """SHA-256 of a document's raw content. Combined with chunking_fingerprint() into every
+    chunk's file_hash metadata so re-ingests can skip files whose content is unchanged."""
+    return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+
+
+def chunking_fingerprint():
+    """Short hash of every setting that changes chunk boundaries or chunk content.
+
+    Folded into the stored file_hash: identical file content must still re-chunk when
+    chunk_size/overlap/enrichment change, or skip-unchanged would silently keep
+    old-boundary chunks after a config change."""
+    key = f"{settings.chunk_size}:{settings.chunk_overlap}:{settings.min_chunk_size}:{settings.contextual_enrich}"
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
+def file_hash_for(doc):
+    """The value stored in chunk metadata and compared by skip-unchanged."""
+    return f"{doc.content_hash}:{chunking_fingerprint()}"
 
 
 @dataclass
@@ -325,6 +347,7 @@ def load_documents(directory):
                                 "multimodal": True,
                                 "image_count": len(extracted.images),
                             },
+                            content_hash=compute_content_hash(extracted.text),
                         )
                     )
                     logger.info(f"Loaded (multimodal): {rel_path} ({lang})")
@@ -333,7 +356,9 @@ def load_documents(directory):
             content = filepath.read_text(encoding="utf-8", errors="replace")
             if not content.strip():
                 continue
-            docs.append(Document(content=content, filepath=rel_path, language=lang))
+            docs.append(
+                Document(content=content, filepath=rel_path, language=lang, content_hash=compute_content_hash(content))
+            )
             logger.info(f"Loaded: {rel_path} ({lang}, {count_tokens(content)} tokens)")
 
         except Exception as e:
@@ -363,11 +388,12 @@ def load_single_file(filepath, base_dir=""):
                     filepath=rel,
                     language=lang,
                     metadata={"multimodal": True},
+                    content_hash=compute_content_hash(extracted.text),
                 )
             return None
 
         content = p.read_text(encoding="utf-8", errors="replace")
-        return Document(content=content, filepath=rel, language=lang)
+        return Document(content=content, filepath=rel, language=lang, content_hash=compute_content_hash(content))
     except Exception as e:
         logger.error(f"Failed to load {filepath}: {e}")
         return None
@@ -728,6 +754,9 @@ CODE_LANGUAGES = {"python", "javascript", "typescript", "go", "rust", "java", "r
 
 
 def chunk_document(doc):
+    if not doc.content_hash:
+        doc.content_hash = compute_content_hash(doc.content)
+
     if doc.language in CODE_LANGUAGES:
         chunks = _chunk_code(doc)
     else:
@@ -736,6 +765,7 @@ def chunk_document(doc):
     for chunk in chunks:
         chunk.metadata["language"] = doc.language
         chunk.metadata["source_file"] = doc.filepath
+        chunk.metadata["file_hash"] = file_hash_for(doc)
         chunk.metadata.update(doc.metadata)
 
     logger.info(f"Chunked {doc.filepath} -> {len(chunks)} chunks")

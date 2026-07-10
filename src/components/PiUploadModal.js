@@ -56,11 +56,11 @@ function PiUploadModal({ onClose, onToast, onDocAdded }) {
         <div className="upload-zone" onClick={() => fileRef.current && fileRef.current.click()}>
           <input ref={fileRef} type="file" accept=".pdf" hidden onChange={(e) => setFile(e.target.files[0])} />
           {file ? (
-            <span style={{ fontSize: 13, color: 'var(--neon-cyan)' }}>
+            <span style={{ fontSize: 13, color: 'var(--accent)' }}>
               <FileText size={14} style={{ verticalAlign: -2 }} /> {file.name}
             </span>
           ) : (
-            <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
               <Upload size={18} style={{ display: 'block', margin: '0 auto 6px' }} /> Click to select a PDF
             </span>
           )}

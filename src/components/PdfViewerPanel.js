@@ -11,7 +11,7 @@ function PdfViewerPanel({ source, onClose }) {
         </span>
         <button
           onClick={onClose}
-          style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+          style={{ background: 'none', border: 'none', color: 'var(--text-3)', cursor: 'pointer' }}
         >
           <X size={16} />
         </button>

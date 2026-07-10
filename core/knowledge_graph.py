@@ -20,6 +20,14 @@ Graph construction (POST /api/graph/build), mode = settings.graph_extraction:
   detection stamps every node with a `community` id. Community summaries are
   generated lazily on first request and cached into the graph JSON.
 
+Incremental merge (progressive indexing): update_from_chunks(chunks) runs the
+same per-chunk NER/regex extraction on only the freshly ingested chunks and
+merges the results into the existing graph (LLM-free modes only). Stale
+chunk_id references from re-ingested documents are pruned first via a
+persisted document_path → chunk_ids index. The alias-edge matmul and Louvain
+are too heavy to run per-ingest, so increments only mark communities stale;
+they are recomputed lazily on the next get_communities() call or full build.
+
 Hybrid retrieval:
   1. Embed query → cosine-rank entity names → pick top-K seed nodes
   2. Personalized PageRank from the seeds (HippoRAG 2 style; 2-hop BFS fallback)
@@ -32,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -251,6 +260,13 @@ class KnowledgeGraph:
         # Lazy community summaries, keyed by str(community_id) for JSON stability
         self._community_summaries: dict[str, str] = {}
         self._path: Path | None = None  # set on save/load — lets summaries persist
+        # document_path → chunk_ids ever attributed — lets incremental merges prune
+        # stale references when a file is re-ingested (chunk ids are opaque hashes)
+        self._doc_chunks: dict[str, set[str]] = {}
+        # Set by update_from_chunks; alias edges + Louvain are recomputed lazily
+        # on the next get_communities() or full build instead of per-ingest
+        self._communities_stale = False
+        self._llm_incremental_warned = False
 
     def reset(self):
         """Clear graph data for a fresh rebuild. Safer than calling __init__()."""
@@ -261,6 +277,8 @@ class KnowledgeGraph:
             self._entity_keys = None
             self._entity_vecs = None
             self._community_summaries = {}
+            self._doc_chunks = {}
+            self._communities_stale = False
 
     # ── entity embedding cache ────────────────────────────────────────────────
 
@@ -304,6 +322,8 @@ class KnowledgeGraph:
             node["chunk_ids"].append(chunk_id)
         if doc_path and doc_path not in node["doc_paths"]:
             node["doc_paths"].append(doc_path)
+        if chunk_id and doc_path:
+            self._doc_chunks.setdefault(doc_path, set()).add(chunk_id)
 
     def add_relation(self, src_name: str, tgt_name: str, rel_type: str):
         sk = self._canon(src_name)
@@ -367,6 +387,7 @@ class KnowledgeGraph:
             self._build_entity_cache()  # pre-compute embeddings once here
             alias_edges = self._add_alias_edges()
             communities = self._detect_communities()
+            self._communities_stale = False  # full build recomputes alias edges + Louvain
             self._community_summaries = {}  # summaries are stale after any rebuild
             ms = int((time.time() - t0) * 1000)
 
@@ -557,6 +578,161 @@ class KnowledgeGraph:
 
         return {"entities": entities, "relations": relations, "errors": errors, "batches": num_batches}
 
+    # ── incremental merge (progressive indexing) ──────────────────────────────
+
+    def update_from_chunks(self, chunks: list[dict]) -> dict:
+        """Merge freshly ingested chunks into the existing graph without a full rebuild.
+
+        *chunks*: list of {"chunk_id", "content", "metadata"} dicts, where metadata
+        carries document_path. Supported only for the LLM-free extraction modes
+        ('ner'/'hybrid' — the hybrid LLM hub pass is skipped on increments); in
+        'llm' mode this logs once and returns {"skipped": "llm mode"}.
+
+        A re-ingested file replaces its chunks wholesale, so stale chunk_id
+        references for the incoming document_paths are pruned first (nodes left
+        with no chunks and no edges are dropped), then the standard per-chunk
+        NER/regex extraction runs on just these chunks — reusing
+        add_entity/add_relation for canonicalization, weight-increment dedup, and
+        single-chunk attribution. New entity embeddings are appended to the cache
+        in one batch. The alias-edge matmul and Louvain community detection are
+        too heavy per-ingest: increments only set _communities_stale, and the next
+        get_communities() call or full build recomputes them.
+
+        Returns {"entities_added": n, "edges_added": m, "chunks_processed": k}.
+        """
+        mode = (settings.graph_extraction or "ner").lower()
+        if mode == "llm":
+            if not self._llm_incremental_warned:
+                logger.warning("Incremental graph merge is not supported in 'llm' extraction mode — skipping")
+                self._llm_incremental_warned = True
+            return {"skipped": "llm mode"}
+        if not chunks:
+            return {"entities_added": 0, "edges_added": 0, "chunks_processed": 0}
+
+        all_ids = [c.get("chunk_id", "") for c in chunks]
+        all_docs = [c.get("content") or "" for c in chunks]
+        all_metas = [c.get("metadata") or {} for c in chunks]
+        replaced_paths = {m.get("document_path", "") for m in all_metas if m.get("document_path")}
+
+        t0 = time.time()
+        with self._lock:
+            self._prune_replaced_docs(replaced_paths, fresh_ids=set(all_ids))
+            pre_nodes = set(self.graph.nodes())
+            pre_edges = self.graph.number_of_edges()
+
+            self._extract_ner(all_ids, all_docs, all_metas)
+
+            # doc_paths hygiene: a surviving node keeps a replaced path only when it
+            # still references one of that document's (fresh) chunks after the merge
+            for key in self.graph.nodes():
+                nd = self.graph.nodes[key]
+                if not replaced_paths.intersection(nd.get("doc_paths", [])):
+                    continue
+                cids = set(nd.get("chunk_ids", []))
+                nd["doc_paths"] = [
+                    p for p in nd["doc_paths"] if p not in replaced_paths or cids & self._doc_chunks.get(p, set())
+                ]
+
+            new_keys = [k for k in self.graph.nodes() if k not in pre_nodes]
+            edges_added = self.graph.number_of_edges() - pre_edges
+            self._append_entity_vecs(new_keys)
+            self._communities_stale = True
+            self.total_chunks_processed += len(chunks)
+            if self.built_at is None:
+                self.built_at = time.time()
+            if self._path is not None:
+                try:
+                    self.save(self._path)
+                except Exception as e:
+                    logger.warning(f"Incremental graph save failed: {e}")
+
+        logger.info(
+            "Knowledge graph incremental merge: +%d entities, +%d edges from %d chunks in %dms",
+            len(new_keys),
+            edges_added,
+            len(chunks),
+            int((time.time() - t0) * 1000),
+        )
+        return {"entities_added": len(new_keys), "edges_added": edges_added, "chunks_processed": len(chunks)}
+
+    def _prune_replaced_docs(self, replaced_paths: set[str], fresh_ids: set[str]):
+        """Drop chunk_id references left over from previous versions of re-ingested docs.
+
+        Uses the persisted _doc_chunks index; for graphs saved before that index
+        existed, falls back to pruning nodes whose doc_paths are entirely within the
+        replaced set (mixed-doc nodes keep unidentifiable ids — dead ids are harmless,
+        they simply no longer resolve in ChromaDB and vanish on the next full build).
+        Nodes left with no chunk_ids AND degree 0 are removed; stale co_occurs edges
+        are left for the next full rebuild.
+        """
+        if not replaced_paths:
+            return
+        stale_ids: set[str] = set()
+        legacy_paths: set[str] = set()  # replaced paths absent from the chunk index
+        for p in replaced_paths:
+            known = self._doc_chunks.pop(p, None)  # add_entity repopulates with fresh ids
+            if known is None:
+                legacy_paths.add(p)
+            else:
+                stale_ids |= known - fresh_ids
+        if not stale_ids and not legacy_paths:
+            return
+
+        dropped: list[str] = []
+        for key, nd in self.graph.nodes(data=True):
+            cids = nd.get("chunk_ids", [])
+            pruned = [c for c in cids if c not in stale_ids]
+            if legacy_paths and nd.get("doc_paths") and set(nd["doc_paths"]) <= replaced_paths:
+                pruned = [c for c in pruned if c in fresh_ids]
+            if len(pruned) != len(cids):
+                nd["chunk_ids"] = pruned
+            if not pruned and self.graph.degree(key) == 0:
+                dropped.append(key)
+        for key in dropped:
+            self.graph.remove_node(key)
+        if dropped:
+            self._drop_entity_vecs(dropped)
+            logger.info(f"Pruned {len(dropped)} orphaned graph nodes across {len(replaced_paths)} re-ingested docs")
+
+    def _append_entity_vecs(self, new_keys: list[str]):
+        """Batch-embed only the new entities and append them to the cache. On failure
+        the cache is invalidated and rebuilt lazily on next use (graceful degradation)."""
+        if not new_keys:
+            return
+        if self._entity_vecs is None or self._entity_keys is None:
+            return  # cache never built — _ensure_entity_cache embeds everything lazily
+        from core.retriever import embed_texts
+
+        names = [self.graph.nodes[k].get("display_name", k) for k in new_keys]
+        try:
+            vecs = np.array(embed_texts(names), dtype=np.float32)
+            if self._entity_vecs.size == 0:
+                self._entity_keys = list(new_keys)
+                self._entity_vecs = vecs
+            else:
+                self._entity_keys = self._entity_keys + list(new_keys)
+                self._entity_vecs = np.vstack([self._entity_vecs, vecs])
+            logger.info(f"Entity embedding cache extended: +{len(new_keys)} entities")
+        except Exception as e:
+            logger.warning(f"Entity cache append failed ({e}) — cache will rebuild lazily")
+            self._entity_keys = None
+            self._entity_vecs = None
+
+    def _drop_entity_vecs(self, keys: list[str]):
+        """Remove dropped nodes from the entity-embedding cache so retrieval never
+        seeds from a node that no longer exists in the graph."""
+        if self._entity_vecs is None or self._entity_keys is None or not keys:
+            return
+        drop = set(keys)
+        keep = [i for i, k in enumerate(self._entity_keys) if k not in drop]
+        if len(keep) == len(self._entity_keys):
+            return
+        # Build both, then swap in one tuple assignment so a reader can never
+        # observe fresh keys zipped against stale vecs (or vice versa)
+        new_keys = [self._entity_keys[i] for i in keep]
+        new_vecs = self._entity_vecs[keep] if keep else np.empty((0, 0), dtype=np.float32)
+        self._entity_keys, self._entity_vecs = new_keys, new_vecs
+
     def _hub_chunk_indices(self, all_ids: list, top_n: int = 50, per_hub: int = 2, max_chunks: int = 100) -> list:
         """Indices (into all_ids) of the chunks referenced by the top-degree
         entities — the subset the hybrid mode sends through the LLM."""
@@ -627,25 +803,48 @@ class KnowledgeGraph:
         logger.info(f"Louvain: {len(comms)} communities")
         return len(comms)
 
+    def _refresh_communities_if_stale(self):
+        """Alias edges + Louvain are skipped during incremental merges (too heavy
+        per-ingest); recompute them here lazily the first time communities are needed."""
+        if not self._communities_stale:
+            return
+        with self._lock:
+            if not self._communities_stale:  # another thread refreshed while we waited
+                return
+            self._ensure_entity_cache()
+            alias = self._add_alias_edges()
+            comms = self._detect_communities()
+            self._communities_stale = False
+            self._community_summaries = {}  # membership shifted — cached summaries are stale
+            logger.info(f"Lazy community refresh after incremental merge: {comms} communities, +{alias} alias edges")
+            if self._path is not None:
+                try:
+                    self.save(self._path)
+                except Exception as e:
+                    logger.warning(f"Community refresh persist failed: {e}")
+
     def get_communities(self, top_entities: int = 5) -> list[dict]:
-        """Community roster — pure graph math, no LLM. Sorted largest-first."""
-        groups: dict[int, list[str]] = {}
-        for key, nd in self.graph.nodes(data=True):
-            cid = nd.get("community")
-            if isinstance(cid, int):
-                groups.setdefault(cid, []).append(key)
-        out = []
-        for cid, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-            ranked = sorted(members, key=lambda k: self.graph.degree(k), reverse=True)
-            out.append(
-                {
-                    "community_id": cid,
-                    "size": len(members),
-                    "top_entities": [self.graph.nodes[k].get("display_name", k) for k in ranked[:top_entities]],
-                    "has_summary": str(cid) in self._community_summaries,
-                }
-            )
-        return out
+        """Community roster — pure graph math, no LLM. Sorted largest-first.
+        Recomputes alias edges + Louvain first when incremental merges left them stale."""
+        with self._lock:  # RLock — the nested acquire in the refresh + save path is fine
+            self._refresh_communities_if_stale()
+            groups: dict[int, list[str]] = {}
+            for key, nd in self.graph.nodes(data=True):
+                cid = nd.get("community")
+                if isinstance(cid, int):
+                    groups.setdefault(cid, []).append(key)
+            out = []
+            for cid, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+                ranked = sorted(members, key=lambda k: self.graph.degree(k), reverse=True)
+                out.append(
+                    {
+                        "community_id": cid,
+                        "size": len(members),
+                        "top_entities": [self.graph.nodes[k].get("display_name", k) for k in ranked[:top_entities]],
+                        "has_summary": str(cid) in self._community_summaries,
+                    }
+                )
+            return out
 
     def summarize_community(self, community_id: int, store) -> str:
         """Lazy LLM summary of one community from its top entities' chunks.
@@ -657,21 +856,22 @@ class KnowledgeGraph:
         if cached:
             return cached
 
-        members = [k for k, nd in self.graph.nodes(data=True) if nd.get("community") == community_id]
-        if not members:
-            return ""
-        ranked = sorted(members, key=lambda k: self.graph.degree(k), reverse=True)
-        top_names = [self.graph.nodes[k].get("display_name", k) for k in ranked[:10]]
+        with self._lock:  # snapshot member/degree/chunk reads — ingest merges mutate the graph concurrently
+            members = [k for k, nd in self.graph.nodes(data=True) if nd.get("community") == community_id]
+            if not members:
+                return ""
+            ranked = sorted(members, key=lambda k: self.graph.degree(k), reverse=True)
+            top_names = [self.graph.nodes[k].get("display_name", k) for k in ranked[:10]]
 
-        chunk_ids: list[str] = []
-        for key in ranked[:10]:
-            for cid in self.graph.nodes[key].get("chunk_ids", []):
-                if cid not in chunk_ids:
-                    chunk_ids.append(cid)
+            chunk_ids: list[str] = []
+            for key in ranked[:10]:
+                for cid in self.graph.nodes[key].get("chunk_ids", []):
+                    if cid not in chunk_ids:
+                        chunk_ids.append(cid)
+                    if len(chunk_ids) >= 6:
+                        break
                 if len(chunk_ids) >= 6:
                     break
-            if len(chunk_ids) >= 6:
-                break
 
         excerpts = ""
         if chunk_ids and store is not None:
@@ -726,92 +926,99 @@ class KnowledgeGraph:
         """
         from core.retriever import embed_texts
 
-        if self.graph.number_of_nodes() == 0:
-            return [], {}
+        # Hold the lock for the entire read: update_from_chunks mutates graph /
+        # _entity_keys / _entity_vecs from the per-ingest daemon thread, and
+        # nx.pagerank over a concurrently mutating node dict raises "dictionary
+        # changed size during iteration". A full PPR pass is milliseconds at this
+        # graph scale, so finer lock granularity is not worth the complexity.
+        with self._lock:
+            if self.graph.number_of_nodes() == 0:
+                return [], {}
 
-        # Use pre-cached entity embeddings — only embed the query (1 text vs N texts)
-        self._ensure_entity_cache()
-        if self._entity_vecs is None or self._entity_vecs.shape[0] == 0:
-            return [], {}
+            # Use pre-cached entity embeddings — only embed the query (1 text vs N texts)
+            self._ensure_entity_cache()
+            if self._entity_vecs is None or self._entity_vecs.shape[0] == 0:
+                return [], {}
 
-        try:
-            q_vecs = embed_texts([query])
-        except Exception as e:
-            logger.warning(f"Graph retrieve query embedding failed: {e}")
-            return [], {}
+            try:
+                q_vecs = embed_texts([query])
+            except Exception as e:
+                logger.warning(f"Graph retrieve query embedding failed: {e}")
+                return [], {}
 
-        q_vec = np.array(q_vecs[0], dtype=np.float32)
-        # _entity_vecs is already L2-normalised; q_vec from embed_texts is also normalised
-        sims = (self._entity_vecs @ q_vec).tolist()
-        entity_keys = self._entity_keys
-        ranked = sorted(zip(sims, entity_keys), reverse=True)
+            q_vec = np.array(q_vecs[0], dtype=np.float32)
+            # _entity_vecs is already L2-normalised; q_vec from embed_texts is also normalised
+            sims = (self._entity_vecs @ q_vec).tolist()
+            entity_keys = self._entity_keys
+            ranked = sorted(zip(sims, entity_keys), reverse=True)
 
-        # Top-3 seed nodes (with their similarity scores) — take top-3 unconditionally
-        seed_pairs = [(sim, k) for sim, k in ranked[:3] if sim > 0.1]
-        if not seed_pairs:
-            return [], {"seeds": [], "nodes": [], "edges": [], "chunks_found": 0, "message": "No matching entities"}
+            # Top-3 seed nodes (with their similarity scores) — take top-3 unconditionally
+            seed_pairs = [(sim, k) for sim, k in ranked[:3] if sim > 0.1]
+            if not seed_pairs:
+                return [], {"seeds": [], "nodes": [], "edges": [], "chunks_found": 0, "message": "No matching entities"}
 
-        seeds = [k for _, k in seed_pairs]
-        seed_info = [
-            {"key": k, "display": self.graph.nodes[k].get("display_name", k), "sim": round(s, 3)} for s, k in seed_pairs
-        ]
+            seeds = [k for _, k in seed_pairs]
+            seed_info = [
+                {"key": k, "display": self.graph.nodes[k].get("display_name", k), "sim": round(s, 3)}
+                for s, k in seed_pairs
+            ]
 
-        personalization = {k: max(sim, 0.0) for sim, k in seed_pairs}
-        if seed_chunk_ids:
-            seed_cid_set = set(seed_chunk_ids)
-            for key, nd in self.graph.nodes(data=True):
-                if seed_cid_set.intersection(nd.get("chunk_ids", [])):
-                    personalization[key] = personalization.get(key, 0.0) + 0.5
+            personalization = {k: max(sim, 0.0) for sim, k in seed_pairs}
+            if seed_chunk_ids:
+                seed_cid_set = set(seed_chunk_ids)
+                for key, nd in self.graph.nodes(data=True):
+                    if seed_cid_set.intersection(nd.get("chunk_ids", [])):
+                        personalization[key] = personalization.get(key, 0.0) + 0.5
 
-        try:
-            # Edge weights increment on repeated relations, so PPR is weight-aware for free
-            ppr = nx.pagerank(
-                self.graph.to_undirected(),
-                alpha=0.85,
-                personalization=personalization,
-                weight="weight",
-            )
-        except Exception as e:
-            logger.warning(f"Personalized PageRank failed, falling back to BFS: {e}")
-            return self._bfs_retrieve(seeds, seed_info, store, top_k)
+            try:
+                # Edge weights increment on repeated relations, so PPR is weight-aware for free
+                ppr = nx.pagerank(
+                    self.graph.to_undirected(),
+                    alpha=0.85,
+                    personalization=personalization,
+                    weight="weight",
+                )
+            except Exception as e:
+                logger.warning(f"Personalized PageRank failed, falling back to BFS: {e}")
+                return self._bfs_retrieve(seeds, seed_info, store, top_k)
 
-        # Chunk score = sum of PPR mass over the entities that reference it
-        chunk_scores: dict[str, float] = {}
-        for key, mass in ppr.items():
-            if mass <= 0.0:
-                continue
-            for cid in self.graph.nodes[key].get("chunk_ids", []):
-                chunk_scores[cid] = chunk_scores.get(cid, 0.0) + mass
+            # Chunk score = sum of PPR mass over the entities that reference it
+            chunk_scores: dict[str, float] = {}
+            for key, mass in ppr.items():
+                if mass <= 0.0:
+                    continue
+                for cid in self.graph.nodes[key].get("chunk_ids", []):
+                    chunk_scores[cid] = chunk_scores.get(cid, 0.0) + mass
 
-        traversal_info = self._ppr_traversal_info(seeds, seed_info, ppr)
+            traversal_info = self._ppr_traversal_info(seeds, seed_info, ppr)
 
-        if not chunk_scores:
-            return [], traversal_info
+            if not chunk_scores:
+                return [], traversal_info
 
-        max_score = max(chunk_scores.values())
-        ids_to_fetch = [cid for cid, _ in sorted(chunk_scores.items(), key=lambda kv: kv[1], reverse=True)[:50]]
+            max_score = max(chunk_scores.values())
+            ids_to_fetch = [cid for cid, _ in sorted(chunk_scores.items(), key=lambda kv: kv[1], reverse=True)[:50]]
 
-        try:
-            raw = store.collection.get(ids=ids_to_fetch, include=["documents", "metadatas"])
-        except Exception as e:
-            logger.warning(f"Graph chunk fetch failed: {e}")
-            return [], traversal_info
+            try:
+                raw = store.collection.get(ids=ids_to_fetch, include=["documents", "metadatas"])
+            except Exception as e:
+                logger.warning(f"Graph chunk fetch failed: {e}")
+                return [], traversal_info
 
-        hits = []
-        for cid, doc, meta in zip(raw.get("ids", []), raw.get("documents", []), raw.get("metadatas", [])):
-            hits.append(
-                {
-                    "id": cid,
-                    "content": doc,
-                    "metadata": meta,
-                    "score": round(chunk_scores[cid] / max_score, 4),
-                    "search_type": "graph",
-                }
-            )
-        hits.sort(key=lambda h: h["score"], reverse=True)
+            hits = []
+            for cid, doc, meta in zip(raw.get("ids", []), raw.get("documents", []), raw.get("metadatas", [])):
+                hits.append(
+                    {
+                        "id": cid,
+                        "content": doc,
+                        "metadata": meta,
+                        "score": round(chunk_scores[cid] / max_score, 4),
+                        "search_type": "graph",
+                    }
+                )
+            hits.sort(key=lambda h: h["score"], reverse=True)
 
-        traversal_info["chunks_found"] = len(hits)
-        return hits[:top_k], traversal_info
+            traversal_info["chunks_found"] = len(hits)
+            return hits[:top_k], traversal_info
 
     def _ppr_traversal_info(self, seeds: list[str], seed_info: list[dict], ppr: dict[str, float]) -> dict:
         """Derive the graph_path WS payload (nodes + edges) from the top-PPR nodes,
@@ -974,70 +1181,72 @@ class KnowledgeGraph:
 
     def get_viz_data(self, max_nodes: int = 200) -> dict:
         """Return capped nodes + edges suitable for the frontend force layout."""
-        if self.graph.number_of_nodes() == 0:
-            return {"nodes": [], "edges": [], "stats": self.get_stats()}
+        with self._lock:  # the ingest daemon's update_from_chunks mutates the graph concurrently
+            if self.graph.number_of_nodes() == 0:
+                return {"nodes": [], "edges": [], "stats": self.get_stats()}
 
-        # Pick top nodes by degree centrality (most connected first)
-        degree_map = dict(self.graph.degree())
-        top_keys = sorted(degree_map, key=lambda k: degree_map[k], reverse=True)[:max_nodes]
-        top_set = set(top_keys)
+            # Pick top nodes by degree centrality (most connected first)
+            degree_map = dict(self.graph.degree())
+            top_keys = sorted(degree_map, key=lambda k: degree_map[k], reverse=True)[:max_nodes]
+            top_set = set(top_keys)
 
-        # Assign a color index per unique doc (stable ordering)
-        all_docs = []
-        for k in top_keys:
-            for dp in self.graph.nodes[k].get("doc_paths", []):
-                if dp not in all_docs:
-                    all_docs.append(dp)
-        doc_color = {dp: i for i, dp in enumerate(all_docs)}
+            # Assign a color index per unique doc (stable ordering)
+            all_docs = []
+            for k in top_keys:
+                for dp in self.graph.nodes[k].get("doc_paths", []):
+                    if dp not in all_docs:
+                        all_docs.append(dp)
+            doc_color = {dp: i for i, dp in enumerate(all_docs)}
 
-        nodes = []
-        for k in top_keys:
-            nd = self.graph.nodes[k]
-            dp_list = nd.get("doc_paths", [])
-            primary_doc = dp_list[0] if dp_list else ""
-            nodes.append(
-                {
-                    "id": k,
-                    "label": nd.get("display_name", k),
-                    "type": nd.get("node_type", "concept"),
-                    "doc": primary_doc,
-                    "color_idx": doc_color.get(primary_doc, 0),
-                    "degree": degree_map[k],
-                    "chunk_count": len(nd.get("chunk_ids", [])),
-                    "community": nd.get("community", -1),
-                }
-            )
-
-        edges = []
-        for src, tgt, data in self.graph.edges(data=True):
-            if src in top_set and tgt in top_set:
-                edges.append(
+            nodes = []
+            for k in top_keys:
+                nd = self.graph.nodes[k]
+                dp_list = nd.get("doc_paths", [])
+                primary_doc = dp_list[0] if dp_list else ""
+                nodes.append(
                     {
-                        "source": src,
-                        "target": tgt,
-                        "rel": data.get("rel_type", "related_to"),
-                        "weight": data.get("weight", 1),
+                        "id": k,
+                        "label": nd.get("display_name", k),
+                        "type": nd.get("node_type", "concept"),
+                        "doc": primary_doc,
+                        "color_idx": doc_color.get(primary_doc, 0),
+                        "degree": degree_map[k],
+                        "chunk_count": len(nd.get("chunk_ids", [])),
+                        "community": nd.get("community", -1),
                     }
                 )
 
-        return {"nodes": nodes, "edges": edges, "stats": self.get_stats()}
+            edges = []
+            for src, tgt, data in self.graph.edges(data=True):
+                if src in top_set and tgt in top_set:
+                    edges.append(
+                        {
+                            "source": src,
+                            "target": tgt,
+                            "rel": data.get("rel_type", "related_to"),
+                            "weight": data.get("weight", 1),
+                        }
+                    )
+
+            return {"nodes": nodes, "edges": edges, "stats": self.get_stats()}
 
     def get_stats(self) -> dict:
-        all_docs = set()
-        communities = set()
-        for _, nd in self.graph.nodes(data=True):
-            all_docs.update(nd.get("doc_paths", []))
-            cid = nd.get("community")
-            if isinstance(cid, int):
-                communities.add(cid)
-        return {
-            "nodes": self.graph.number_of_nodes(),
-            "edges": self.graph.number_of_edges(),
-            "documents": len(all_docs),
-            "communities": len(communities),
-            "built_at": self.built_at,
-            "chunks_processed": self.total_chunks_processed,
-        }
+        with self._lock:  # the ingest daemon's update_from_chunks mutates the graph concurrently
+            all_docs = set()
+            communities = set()
+            for _, nd in self.graph.nodes(data=True):
+                all_docs.update(nd.get("doc_paths", []))
+                cid = nd.get("community")
+                if isinstance(cid, int):
+                    communities.add(cid)
+            return {
+                "nodes": self.graph.number_of_nodes(),
+                "edges": self.graph.number_of_edges(),
+                "documents": len(all_docs),
+                "communities": len(communities),
+                "built_at": self.built_at,
+                "chunks_processed": self.total_chunks_processed,
+            }
 
     # ── persistence ───────────────────────────────────────────────────────────
 
@@ -1048,29 +1257,63 @@ class KnowledgeGraph:
                 "built_at": self.built_at,
                 "total_chunks_processed": self.total_chunks_processed,
                 "community_summaries": self._community_summaries,
+                "communities_stale": self._communities_stale,
+                "doc_chunks": {p: sorted(ids) for p, ids in self._doc_chunks.items()},
                 "graph": nx.node_link_data(self.graph),
             }
-            path.write_text(json.dumps(data, indent=2))
+            # Atomic write: update_from_chunks saves on every ingest from a daemon
+            # thread — a crash mid-write must never truncate the graph file
+            _atomic_write_json(path, data)
             self._path = path
             logger.info(f"Knowledge graph saved: {path} ({self.graph.number_of_nodes()} nodes)")
 
     def load(self, path: Path):
+        # A stray temp file means an atomic save died between write and replace —
+        # the real file (if any) is still the last good snapshot; drop the orphan.
+        tmp = path.with_name(path.name + ".tmp")
+        if tmp.exists():
+            try:
+                tmp.unlink()
+                logger.warning(f"Removed stale graph temp file from an interrupted save: {tmp}")
+            except OSError as e:
+                logger.warning(f"Could not remove stale graph temp file {tmp}: {e}")
         try:
             data = json.loads(path.read_text())
             self.built_at = data.get("built_at")
             self.total_chunks_processed = data.get("total_chunks_processed", 0)
             self._community_summaries = data.get("community_summaries", {}) or {}
+            self._communities_stale = bool(data.get("communities_stale", False))
+            self._doc_chunks = {p: set(ids) for p, ids in (data.get("doc_chunks") or {}).items()}
             self.graph = nx.node_link_graph(data["graph"], directed=True, multigraph=False)
             self._path = path
             logger.info(f"Knowledge graph loaded: {path} ({self.graph.number_of_nodes()} nodes)")
             self._build_entity_cache()  # warm the cache on load
         except Exception as e:
-            logger.warning(f"Failed to load knowledge graph: {e}")
+            logger.warning(f"Failed to load knowledge graph {path} — falling back to an EMPTY graph: {e}")
             self.graph = nx.DiGraph()
             self._community_summaries = {}
+            self._doc_chunks = {}
+            self._communities_stale = False
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON to a temp file in the same directory, then os.replace into place
+    (mirrors core.tree_indexer._atomic_write_json)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    # On Windows, os.replace raises PermissionError if a concurrent reader holds the file open.
+    for attempt in range(3):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.1)
 
 
 def _parse_extraction(text: str) -> dict:
@@ -1102,16 +1345,23 @@ def _parse_extraction(text: str) -> dict:
 # ── per-user graph factory ────────────────────────────────────────────────────
 
 _graph_cache: dict[str, KnowledgeGraph] = {}
+# Guards cache get-or-create: an ingest daemon thread and a request thread racing
+# here would each build a KnowledgeGraph for the same uid and one merge would be lost
+_graph_cache_lock = threading.Lock()
 
 
 def get_user_graph(uid: str) -> KnowledgeGraph:
-    if uid not in _graph_cache:
-        g = KnowledgeGraph()
-        path = GRAPHS_DIR / f"{uid}.json"
-        if path.exists():
-            g.load(path)
-        _graph_cache[uid] = g
-    return _graph_cache[uid]
+    g = _graph_cache.get(uid)
+    if g is None:
+        with _graph_cache_lock:
+            g = _graph_cache.get(uid)  # double-checked — another thread may have won the race
+            if g is None:
+                g = KnowledgeGraph()
+                path = GRAPHS_DIR / f"{uid}.json"
+                if path.exists():
+                    g.load(path)
+                _graph_cache[uid] = g
+    return g
 
 
 def save_user_graph(uid: str):

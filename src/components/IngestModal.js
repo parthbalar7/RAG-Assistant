@@ -224,7 +224,7 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
           <h2>Index Documents</h2>
           <button
             onClick={onClose}
-            style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+            style={{ background: 'none', border: 'none', color: 'var(--text-3)', cursor: 'pointer' }}
           >
             <X size={16} />
           </button>
@@ -244,28 +244,18 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
           }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
-          style={
-            dragging
-              ? {
-                  borderColor: 'var(--neon-cyan)',
-                  background: 'rgba(0,240,255,0.06)',
-                  boxShadow: 'inset 0 0 40px rgba(0,240,255,0.05)',
-                }
-              : {}
-          }
         >
           <FolderOpen
             size={28}
             style={{
-              color: dragging ? 'var(--neon-cyan)' : 'var(--text-tertiary)',
+              color: dragging ? 'var(--accent)' : 'var(--text-3)',
               marginBottom: 8,
-              transition: '0.2s',
             }}
           />
-          <p style={{ fontSize: 13, color: dragging ? 'var(--neon-cyan)' : 'var(--text-secondary)', fontWeight: 500 }}>
+          <p style={{ fontSize: 13, color: dragging ? 'var(--accent)' : 'var(--text-2)', fontWeight: 500 }}>
             {dragging ? 'Drop folder or files here' : 'Drag & drop a project folder here'}
           </p>
-          <p style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+          <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 4 }}>
             .py .js .ts .java .kt .cs .go .rs .html .css .sql .md .json .xml and 60+ more
           </p>
         </div>
@@ -343,7 +333,7 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
         {files.length > 0 && (
           <div
             style={{
-              background: 'var(--bg-surface)',
+              background: 'var(--surface)',
               borderRadius: 'var(--radius-md)',
               border: '1px solid var(--border)',
               padding: 12,
@@ -351,7 +341,7 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--neon-cyan)' }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)' }}>
                 {files.length} files {dirCount > 1 ? `across ${dirCount} folders` : ''}
               </span>
               <button
@@ -359,7 +349,7 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: 'var(--text-tertiary)',
+                  color: 'var(--text-3)',
                   cursor: 'pointer',
                   fontSize: 11,
                   display: 'flex',
@@ -379,10 +369,10 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
                     fontSize: 10,
                     padding: '2px 8px',
                     borderRadius: 12,
-                    background: 'var(--accent-soft)',
-                    color: 'var(--neon-cyan)',
+                    background: 'var(--accent-tint)',
+                    color: 'var(--accent)',
                     fontFamily: 'var(--font-mono)',
-                    border: '1px solid var(--border-neon)',
+                    border: '1px solid var(--border)',
                   }}
                 >
                   .{e} ({c})
@@ -400,13 +390,13 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
                     gap: 6,
                     padding: '3px 0',
                     fontSize: 11,
-                    color: 'var(--text-secondary)',
+                    color: 'var(--text-2)',
                     fontFamily: 'var(--font-mono)',
                   }}
                 >
-                  <FolderOpen size={11} style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
-                  <span style={{ color: 'var(--text-primary)' }}>{dir}/</span>
-                  <span style={{ color: 'var(--text-tertiary)' }}>{items.length} files</span>
+                  <FolderOpen size={11} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                  <span style={{ color: 'var(--text-1)' }}>{dir}/</span>
+                  <span style={{ color: 'var(--text-3)' }}>{items.length} files</span>
                 </div>
               ))}
             </div>
@@ -420,9 +410,7 @@ function IngestModal({ onClose, onToast, onRefresh, token }) {
           </div>
         )}
         {loading && (
-          <div
-            style={{ fontSize: 11, color: 'var(--text-tertiary)', textAlign: 'center', fontFamily: 'var(--font-mono)' }}
-          >
+          <div style={{ fontSize: 11, color: 'var(--text-3)', textAlign: 'center', fontFamily: 'var(--font-mono)' }}>
             {progress}% uploaded
           </div>
         )}

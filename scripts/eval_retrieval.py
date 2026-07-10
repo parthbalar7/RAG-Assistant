@@ -98,6 +98,10 @@ def ingest_dirs(store, dirs: list[str]) -> int:
         raise SystemExit(f"error: no ingestable documents found under {', '.join(dirs)}")
     print(f"Embedding {len(all_chunks)} chunks with '{settings.embedding_model}' ...")
     added = store.add_chunks(all_chunks)
+    # Sparse (BM25/SPLADE) rebuilds are debounced into a background thread; block
+    # until they finish so the first eval queries don't hit an empty sparse index.
+    if hasattr(store, "flush_index_rebuild"):
+        store.flush_index_rebuild()
     print(f"Ingested {added} chunks into '{store.collection.name}'")
     return added
 

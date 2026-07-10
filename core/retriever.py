@@ -7,6 +7,8 @@ import heapq
 import logging
 import math
 import re
+import threading
+import time
 from pathlib import Path
 
 import chromadb
@@ -237,41 +239,180 @@ class VectorStore:
         self.splade_index = None  # built only when settings.splade_enabled=True
         self._file_cache = []
         self._file_ids_by_path = {}
-        self._rebuild_indexes()
+        # Progressive indexing: debounced background sparse rebuilds (see _schedule_index_rebuild)
+        self._index_lock = threading.Lock()  # guards generation counters + timer handle
+        self._rebuild_exec_lock = threading.Lock()  # serializes rebuild passes
+        self._rebuild_timer = None  # pending threading.Timer, if any
+        self._index_generation = 0  # bumped on every collection mutation
+        self._built_generation = 0  # generation the live sparse indexes reflect
+        self._last_built = None
+        self._rebuild_indexes()  # startup build stays synchronous — queries work immediately after boot
+        self._last_built = time.time()
 
         logger.info(f"VectorStore ready: {collection_name} ({self.collection.count()} docs)")
 
-    def _rebuild_indexes(self):
-        """Rebuild BM25 (always) and SPLADE (when enabled) from the collection."""
-        if self.collection.count() == 0:
-            self._file_cache = []
-            self._file_ids_by_path = {}
-            return
-        self.bm25_index.build_from_collection(self.collection)
-        self._refresh_metadata_cache()
-        if settings.splade_enabled:
-            try:
-                if self.splade_index is None:
+    def _build_sparse_indexes(self):
+        """Construct NEW BM25/SPLADE index objects from the collection without touching the live ones.
+
+        Returns (bm25_index, splade_index); splade_index is None when disabled or on build failure."""
+        bm25 = BM25Index()
+        splade = None
+        if self.collection.count() > 0:
+            bm25.build_from_collection(self.collection)
+            if settings.splade_enabled:
+                try:
                     from core.splade_index import SPLADEIndex
 
-                    self.splade_index = SPLADEIndex(settings.splade_model)
-                self.splade_index.build_from_collection(self.collection)
-            except Exception as e:
-                logger.warning(f"SPLADE index build failed (falling back to BM25): {e}")
-                self.splade_index = None
+                    splade = SPLADEIndex(settings.splade_model)
+                    splade.build_from_collection(self.collection)
+                except Exception as e:
+                    logger.warning(f"SPLADE index build failed (falling back to BM25): {e}")
+                    splade = None
+        return bm25, splade
+
+    def _rebuild_indexes(self):
+        """Synchronously rebuild BM25 (always) and SPLADE (when enabled), then swap them in atomically."""
+        bm25, splade = self._build_sparse_indexes()
+        self.bm25_index = bm25
+        self.splade_index = splade
+        self._refresh_metadata_cache()
 
     # Keep the old name as an alias so any external callers aren't broken
     def _rebuild_bm25(self):
         self._rebuild_indexes()
+
+    def _schedule_index_rebuild(self):
+        """Called after every collection mutation.
+
+        With sparse_rebuild_debounce_s > 0, the expensive BM25/SPLADE rebuild runs on a background
+        timer that fires after the LAST mutation — repeated mutations within the window coalesce
+        into one rebuild, and queries keep serving the previous index objects meanwhile.
+        A value of 0 restores the old fully synchronous rebuild."""
+        debounce = settings.sparse_rebuild_debounce_s
+        if debounce <= 0:
+            with self._index_lock:
+                self._index_generation += 1
+                target = self._index_generation
+            self._rebuild_indexes()
+            with self._index_lock:
+                self._built_generation = max(self._built_generation, target)
+                self._last_built = time.time()
+            return
+        self._refresh_metadata_cache()  # cheap — file listing stays fresh while the rebuild is pending
+        with self._index_lock:
+            self._index_generation += 1
+            if self._rebuild_timer is not None:
+                self._rebuild_timer.cancel()
+            timer = threading.Timer(debounce, lambda: self._on_rebuild_timer(timer))
+            timer.daemon = True
+            self._rebuild_timer = timer
+            timer.start()
+
+    def _mark_index_mutation_start(self):
+        """Bump the generation BEFORE mutating the collection so an in-flight rebuild that
+        reads a torn snapshot (mid-delete/mid-upsert) fails its swap check and is discarded."""
+        with self._index_lock:
+            self._index_generation += 1
+
+    def _arm_retry_timer(self):
+        """Re-arm a rebuild after a failed build so staleness is never silently permanent."""
+        delay = max(settings.sparse_rebuild_debounce_s, 1.0)
+        with self._index_lock:
+            if self._rebuild_timer is not None:
+                return
+            timer = threading.Timer(delay, lambda: self._on_rebuild_timer(timer))
+            timer.daemon = True
+            self._rebuild_timer = timer
+            timer.start()
+
+    def _on_rebuild_timer(self, timer):
+        with self._index_lock:
+            if self._rebuild_timer is timer:
+                self._rebuild_timer = None
+        try:
+            self._run_rebuild_once()
+        except Exception as e:  # never let the timer thread die with an unhandled error
+            logger.warning(f"Background sparse index rebuild failed: {e}")
+
+    def _run_rebuild_once(self):
+        """One rebuild pass: build new index objects, then swap them in via single attribute
+        assignments — unless a newer mutation arrived mid-build, in which case the stale build
+        is discarded (the newer mutation's own scheduled rebuild supersedes it).
+
+        Returns False only when the build itself failed (a retry timer is armed); a superseded
+        build returns True so flush loops re-run against the newer generation."""
+        with self._rebuild_exec_lock:
+            with self._index_lock:
+                target = self._index_generation
+                if self._built_generation >= target:
+                    return True
+            try:
+                bm25, splade = self._build_sparse_indexes()
+            except Exception as e:
+                # Do NOT record the generation as built — that would report stale
+                # indexes as consistent. Keep serving the old ones and retry.
+                logger.warning(f"Sparse index rebuild failed (keeping previous indexes; retry armed): {e}")
+                self._arm_retry_timer()
+                return False
+            with self._index_lock:
+                if self._index_generation != target:
+                    logger.info("Sparse index rebuild superseded by a newer mutation; discarding stale build")
+                    return True
+                self.bm25_index = bm25
+                self.splade_index = splade
+                self._built_generation = target
+                self._last_built = time.time()
+                return True
+
+    def flush_index_rebuild(self, timeout=None):
+        """Block until the sparse indexes reflect every mutation issued before this call.
+
+        Cancels any pending debounce timer and runs the rebuild inline instead of waiting out the
+        window. Returns True once up to date, False if *timeout* (seconds) expired first or the
+        rebuild itself failed (a background retry stays armed)."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._index_lock:
+            target = self._index_generation
+            if self._rebuild_timer is not None:
+                self._rebuild_timer.cancel()
+                self._rebuild_timer = None
+        while True:
+            with self._index_lock:
+                if self._built_generation >= target:
+                    return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            if not self._run_rebuild_once():
+                return False
+
+    def index_status(self):
+        """Observability for progressive indexing: pending rebuild flag, last build time, indexed docs."""
+        with self._index_lock:
+            pending = self._rebuild_timer is not None or self._built_generation < self._index_generation
+            return {"pending": pending, "last_built": self._last_built, "docs": len(self.bm25_index.doc_ids)}
 
     @property
     def count(self):
         return self.collection.count()
 
     def _refresh_metadata_cache(self):
+        """Rebuild the file-listing / chunk-id caches from the live collection (metadata-only, cheap).
+
+        Reads the collection directly rather than the BM25 arrays so the file tree stays accurate
+        while a debounced sparse rebuild is still pending. New dicts are swapped in atomically."""
+        if self.collection.count() == 0:
+            self._file_cache = []
+            self._file_ids_by_path = {}
+            return
+        try:
+            got = self.collection.get(include=["metadatas"])
+        except Exception as e:
+            logger.warning(f"Metadata cache refresh failed (keeping previous listing): {e}")
+            return
         files = {}
         ids_by_path = {}
-        for doc_id, meta in zip(self.bm25_index.doc_ids, self.bm25_index.doc_metadatas):
+        for doc_id, meta in zip(got["ids"], got["metadatas"] or []):
+            meta = meta or {}
             path = meta.get("document_path", "")
             if not path:
                 continue
@@ -290,6 +431,7 @@ class VectorStore:
         if not chunks:
             return 0
 
+        self._mark_index_mutation_start()
         # Chunk-boundary changes produce new chunk_ids, so upsert alone would leave
         # stale-boundary chunks behind — delete existing chunks for incoming paths first.
         if self.collection.count() > 0:
@@ -327,7 +469,7 @@ class VectorStore:
         from core.embed_cache import get_embed_cache
 
         get_embed_cache().save()
-        self._rebuild_indexes()
+        self._schedule_index_rebuild()
         return added
 
     def vector_search(self, query_text, top_k=10, language_filter=None):
@@ -410,14 +552,31 @@ class VectorStore:
         """Delete all chunks belonging to a specific file."""
         if self.count == 0:
             return 0
-        ids_to_delete = list(self._file_ids_by_path.get(file_path, []))
+        # Query the live collection for ids — the cached mapping can lag within the debounce window
+        try:
+            got = self.collection.get(where={"document_path": file_path}, include=["metadatas"])
+            ids_to_delete = list(got.get("ids") or [])
+        except Exception as e:
+            logger.warning(f"Chunk lookup by path failed for {file_path} (using cached ids): {e}")
+            ids_to_delete = list(self._file_ids_by_path.get(file_path, []))
         if ids_to_delete:
+            self._mark_index_mutation_start()
             self.collection.delete(ids=ids_to_delete)
-            self._rebuild_indexes()
+            self._schedule_index_rebuild()
+            # Deletions are rare and correctness-sensitive: rebuild inline so the
+            # sparse indexes never keep serving a deleted file's content.
+            self.flush_index_rebuild(timeout=60)
             logger.info(f"Deleted {len(ids_to_delete)} chunks for {file_path}")
         return len(ids_to_delete)
 
     def clear(self):
+        # Invalidate pending/in-flight rebuilds so a build of the old collection can't swap in later
+        with self._index_lock:
+            if self._rebuild_timer is not None:
+                self._rebuild_timer.cancel()
+                self._rebuild_timer = None
+            self._index_generation += 1
+            target = self._index_generation
         name = self.collection.name
         self.client.delete_collection(name)
         self.collection = self.client.get_or_create_collection(
@@ -428,6 +587,9 @@ class VectorStore:
         self.splade_index = None
         self._file_cache = []
         self._file_ids_by_path = {}
+        with self._index_lock:
+            self._built_generation = max(self._built_generation, target)
+            self._last_built = time.time()
         logger.info("Vector store cleared")
 
 
@@ -685,7 +847,10 @@ def retrieve(
 
     def sparse_search(q, k):
         if splade_available:
-            return store.splade_index.search(q, top_k=k)
+            # Re-read the attribute: a background index swap may have dropped SPLADE mid-retrieve
+            splade = getattr(store, "splade_index", None)
+            if splade is not None:
+                return splade.search(q, top_k=k)
         return store.bm25_index.search(q, top_k=k)
 
     if variants:

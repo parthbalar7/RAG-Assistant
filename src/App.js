@@ -13,7 +13,6 @@ import {
   PanelRightClose,
   FolderTree,
   Settings,
-  Bot,
   Route,
   LogIn,
   LogOut,
@@ -34,7 +33,6 @@ import { useToast } from './contexts/ToastContext';
 import { useSettings } from './contexts/SettingsContext';
 import useVoiceInput from './hooks/useVoiceInput';
 
-import ParticlesBackground from './components/ParticlesBackground';
 import SourcesPanel from './components/SourcesPanel';
 import DecomposedBadge from './components/DecomposedBadge';
 import GraphPathBadge from './components/GraphPathBadge';
@@ -55,7 +53,7 @@ const GraphPanel = lazy(() => import('./components/GraphPanel'));
 const PiUploadModal = lazy(() => import('./components/PiUploadModal'));
 
 function PanelFallback() {
-  return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-tertiary)' }}>Loading...</div>;
+  return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-3)' }}>Loading...</div>;
 }
 
 function MarkdownFallback({ children }) {
@@ -121,25 +119,14 @@ const MessageRow = memo(
               <Sparkles size={11} />
             </div>
             <span className="msg-name">RAG Assistant</span>
-            {msg.meta && msg.meta.latency && (
-              <span style={{ fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
-                {(msg.meta.latency / 1000).toFixed(1)}s
-              </span>
-            )}
+            {msg.meta && msg.meta.latency && <span className="msg-route">{(msg.meta.latency / 1000).toFixed(1)}s</span>}
             {msg.route && (
               <span className="msg-route">
                 <Route size={8} /> {msg.route.category}
               </span>
             )}
             {msg.memoriesUsed > 0 && (
-              <span
-                className="msg-route"
-                style={{
-                  borderColor: 'rgba(168,85,247,0.3)',
-                  color: 'var(--neon-purple)',
-                  background: 'rgba(168,85,247,0.08)',
-                }}
-              >
+              <span className="msg-route">
                 <Brain size={8} /> {msg.memoriesUsed} memories
               </span>
             )}
@@ -224,7 +211,7 @@ export default function App() {
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(false);
   const [rightTab, setRightTab] = useState('files');
-  const [leftWidth, setLeftWidth] = useState(280);
+  const [leftWidth, setLeftWidth] = useState(260);
   const [rightWidth, setRightWidth] = useState(320);
   const resizingRef = useRef(null);
 
@@ -255,6 +242,9 @@ export default function App() {
   const refreshRef = useRef(null);
   const streamingMainRef = useRef(false);
   const gapContextRef = useRef({});
+  // Session ids created by handleSend mid-send: the history effect must not
+  // fetch-and-replace messages for these, or it wipes the just-sent message.
+  const skipHistoryLoadRef = useRef(null);
   const chatEndRef = useRef(null);
   const textareaRef = useRef(null);
 
@@ -326,6 +316,10 @@ export default function App() {
 
   useEffect(() => {
     if (activeSession) {
+      if (skipHistoryLoadRef.current === activeSession) {
+        skipHistoryLoadRef.current = null;
+        return;
+      }
       api
         .get('/api/sessions/' + activeSession + '/messages', token)
         .then((d) => {
@@ -397,6 +391,7 @@ export default function App() {
         const s = await api.post('/api/sessions', {}, token);
         setSessions((p) => [s, ...p]);
         sid = s.id;
+        skipHistoryLoadRef.current = s.id;
         setActiveSession(s.id);
       } catch (e) {
         /* ok */
@@ -569,6 +564,13 @@ export default function App() {
 
   const hasIndexedDocs = stats && stats.document_count > 0;
   const isReady = hasIndexedDocs || (usePageIndex && !!piActiveDoc);
+  const statusText = [
+    hasIndexedDocs ? `${stats.document_count.toLocaleString()} chunks` : 'no documents indexed',
+    `memory ${useMemory ? 'on' : 'off'}`,
+    llmStatus ? llmStatus.backend : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
   // Always-fresh context for GapPrompt's research socket (stable ref identity
   // survives MessageRow's memo; .current is read at click time).
   gapContextRef.current = {
@@ -615,6 +617,18 @@ export default function App() {
         <button className="sl-new-btn" onClick={newSession}>
           <Plus size={14} /> New Chat
         </button>
+        <div
+          style={{
+            padding: '4px 18px',
+            fontSize: 11,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.02em',
+            color: 'var(--text-3)',
+          }}
+        >
+          Chats
+        </div>
         <div className="sl-sessions">
           {sessions.map((s) => (
             <div
@@ -678,36 +692,7 @@ export default function App() {
           <button className="topbar-btn" onClick={() => setLeftOpen(!leftOpen)}>
             <Menu size={16} />
           </button>
-          <span className="topbar-title">
-            {hasIndexedDocs
-              ? stats.document_count + ' chunks indexed'
-              : usePageIndex && piActiveDoc
-                ? 'Tree search active'
-                : 'Index documents to start'}
-          </span>
-          {useAgent && (
-            <span className="topbar-badge">
-              <Bot size={10} /> AGENT
-            </span>
-          )}
-          {useMemory && (
-            <span
-              className="topbar-badge"
-              style={{
-                borderColor: 'rgba(168,85,247,0.3)',
-                color: 'var(--neon-purple)',
-                background: 'rgba(168,85,247,0.06)',
-              }}
-            >
-              <Brain size={10} /> MEMORY
-            </span>
-          )}
-          {usePageIndex && (
-            <span className="topbar-badge" style={{ borderColor: 'var(--border-glow)', color: 'var(--neon-purple)' }}>
-              TREE SEARCH
-            </span>
-          )}
-          {useHybrid && !usePageIndex && <span className="topbar-badge">HYBRID</span>}
+          <span className="topbar-title">{statusText}</span>
           <div className="topbar-right">
             <button className="topbar-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
               {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
@@ -721,46 +706,28 @@ export default function App() {
         <div className="chat-area">
           {messages.length === 0 ? (
             <div className="welcome">
-              <ParticlesBackground />
-              <div
-                style={{
-                  position: 'relative',
-                  zIndex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                }}
-              >
-                <div className="welcome-hero">
-                  <div className="welcome-orb">
-                    <div className="welcome-orb-inner">
-                      <Sparkles size={20} color="#fff" />
-                    </div>
-                  </div>
+              <h1>Documentation Assistant</h1>
+              <p>
+                {isReady
+                  ? "Ask me anything about your codebase. I'll search, reason, and cite every claim."
+                  : 'Click "Index Documents" in the sidebar to get started.'}
+              </p>
+              {isReady && (
+                <div className="welcome-chips">
+                  {prompts.map((p, i) => (
+                    <button
+                      key={i}
+                      className="welcome-chip"
+                      onClick={() => {
+                        setInput(p);
+                        if (textareaRef.current) textareaRef.current.focus();
+                      }}
+                    >
+                      {p}
+                    </button>
+                  ))}
                 </div>
-                <h1>Documentation Assistant</h1>
-                <p>
-                  {isReady
-                    ? "Ask me anything about your codebase. I'll search, reason, and cite every claim."
-                    : 'Click "Index Documents" in the sidebar to get started.'}
-                </p>
-                {isReady && (
-                  <div className="welcome-chips">
-                    {prompts.map((p, i) => (
-                      <button
-                        key={i}
-                        className="welcome-chip"
-                        onClick={() => {
-                          setInput(p);
-                          if (textareaRef.current) textareaRef.current.focus();
-                        }}
-                      >
-                        {p}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           ) : (
             messages.map((msg, i) => (
@@ -1051,15 +1018,15 @@ export default function App() {
                         className="file-item"
                         style={{
                           cursor: 'pointer',
-                          background: piActiveDoc === d.doc_id ? 'var(--accent-soft)' : undefined,
+                          background: piActiveDoc === d.doc_id ? 'var(--accent-tint)' : undefined,
                           borderRadius: 'var(--radius-sm)',
-                          border: piActiveDoc === d.doc_id ? '1px solid var(--border-neon)' : '1px solid transparent',
+                          border: piActiveDoc === d.doc_id ? '1px solid var(--border)' : '1px solid transparent',
                         }}
                         onClick={() => setPiActiveDoc(piActiveDoc === d.doc_id ? null : d.doc_id)}
                       >
                         <FileText
                           size={12}
-                          style={{ color: piActiveDoc === d.doc_id ? 'var(--neon-cyan)' : 'var(--text-tertiary)' }}
+                          style={{ color: piActiveDoc === d.doc_id ? 'var(--accent)' : 'var(--text-3)' }}
                         />
                         <span
                           style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -1069,8 +1036,10 @@ export default function App() {
                         <span
                           className="file-lang"
                           style={{
-                            background: d.status === 'completed' ? 'rgba(34,245,160,0.1)' : 'rgba(245,158,11,0.1)',
-                            color: d.status === 'completed' ? 'var(--neon-green)' : 'var(--warm)',
+                            background: 'var(--surface-2)',
+                            padding: '1px 6px',
+                            borderRadius: 'var(--radius-sm)',
+                            color: d.status === 'completed' ? 'var(--ok)' : 'var(--warn)',
                           }}
                         >
                           {d.status === 'completed' ? 'ready' : d.status}
@@ -1078,7 +1047,7 @@ export default function App() {
                       </div>
                     ))}
                     {!piActiveDoc && piDocs.length > 0 && (
-                      <div className="settings-hint" style={{ color: 'var(--warm)', marginTop: 6 }}>
+                      <div className="settings-hint" style={{ color: 'var(--warn)', marginTop: 6 }}>
                         Select a document to query
                       </div>
                     )}
@@ -1099,18 +1068,16 @@ export default function App() {
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: 'var(--text-tertiary)' }}>Backend</span>
-                      <span
-                        style={{ color: llmStatus.backend === 'ollama' ? 'var(--neon-cyan)' : 'var(--neon-green)' }}
-                      >
+                      <span style={{ color: 'var(--text-3)' }}>Backend</span>
+                      <span style={{ color: llmStatus.backend === 'ollama' ? 'var(--accent)' : 'var(--ok)' }}>
                         {llmStatus.backend}
                       </span>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                      <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>Model</span>
+                      <span style={{ color: 'var(--text-3)', flexShrink: 0 }}>Model</span>
                       <span
                         style={{
-                          color: 'var(--text-secondary)',
+                          color: 'var(--text-2)',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
@@ -1122,17 +1089,17 @@ export default function App() {
                     </div>
                     {llmStatus.backend === 'ollama' && (
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ color: 'var(--text-tertiary)' }}>Ollama</span>
-                        <span style={{ color: llmStatus.ollama_reachable ? 'var(--neon-green)' : 'var(--warm)' }}>
+                        <span style={{ color: 'var(--text-3)' }}>Ollama</span>
+                        <span style={{ color: llmStatus.ollama_reachable ? 'var(--ok)' : 'var(--warn)' }}>
                           {llmStatus.ollama_reachable ? '\u25CF reachable' : '\u25CB unreachable'}
                         </span>
                       </div>
                     )}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                      <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>Memory</span>
+                      <span style={{ color: 'var(--text-3)', flexShrink: 0 }}>Memory</span>
                       <span
                         style={{
-                          color: 'var(--text-secondary)',
+                          color: 'var(--text-2)',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
@@ -1144,7 +1111,7 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>
                     {'\u2014'}
                   </span>
                 )}
@@ -1165,10 +1132,10 @@ export default function App() {
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                    <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>Embeddings</span>
+                    <span style={{ color: 'var(--text-3)', flexShrink: 0 }}>Embeddings</span>
                     <span
                       style={{
-                        color: 'var(--text-secondary)',
+                        color: 'var(--text-2)',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
@@ -1179,12 +1146,12 @@ export default function App() {
                     </span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ color: 'var(--text-tertiary)' }}>Chunks</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>{stats ? stats.document_count : 0}</span>
+                    <span style={{ color: 'var(--text-3)' }}>Chunks</span>
+                    <span style={{ color: 'var(--text-2)' }}>{stats ? stats.document_count : 0}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ color: 'var(--text-tertiary)' }}>BM25 / Vector</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>
+                    <span style={{ color: 'var(--text-3)' }}>BM25 / Vector</span>
+                    <span style={{ color: 'var(--text-2)' }}>
                       {stats ? stats.bm25_weight : 0.3} / {stats ? stats.vector_weight : 0.7}
                     </span>
                   </div>

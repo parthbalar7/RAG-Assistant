@@ -40,13 +40,13 @@ function FileTreePanel({ refreshKey, token, onToast }) {
   });
 
   if (files.length === 0)
-    return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-tertiary)' }}>No files indexed yet.</div>;
+    return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-3)' }}>No files indexed yet.</div>;
   return (
     <div>
       <div
         style={{
           fontSize: 11,
-          color: 'var(--text-tertiary)',
+          color: 'var(--text-3)',
           padding: '4px 8px',
           marginBottom: 4,
           fontFamily: 'var(--font-mono)',
@@ -61,7 +61,7 @@ function FileTreePanel({ refreshKey, token, onToast }) {
           </div>
           {items.map((f, i) => (
             <div key={i} className="file-item" style={{ gap: 4 }}>
-              <FileCode size={12} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+              <FileCode size={12} style={{ color: 'var(--accent)', flexShrink: 0 }} />
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                 {f.path.split('/').pop()}
               </span>
@@ -74,7 +74,7 @@ function FileTreePanel({ refreshKey, token, onToast }) {
                   background: 'none',
                   border: 'none',
                   cursor: 'pointer',
-                  color: 'var(--text-tertiary)',
+                  color: 'var(--text-3)',
                   padding: '0 2px',
                   flexShrink: 0,
                   opacity: deleting === f.path ? 0.4 : 1,

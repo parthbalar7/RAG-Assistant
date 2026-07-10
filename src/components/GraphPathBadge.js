@@ -20,10 +20,10 @@ function GraphPathBadge({ graphPath }) {
         style={{ cursor: noSeeds ? 'default' : 'pointer' }}
         title="Graph traversal path"
       >
-        <Network size={10} style={{ color: noSeeds ? 'var(--text-tertiary)' : 'var(--neon-purple)' }} />
-        <span style={{ color: noSeeds ? 'var(--text-tertiary)' : 'var(--neon-purple)', fontSize: 10 }}>Graph path</span>
+        <Network size={10} style={{ color: noSeeds ? 'var(--text-3)' : 'var(--accent)' }} />
+        <span style={{ color: noSeeds ? 'var(--text-3)' : 'var(--accent)', fontSize: 10 }}>Graph path</span>
         {noSeeds ? (
-          <span style={{ fontSize: 9, color: 'var(--text-tertiary)' }}>
+          <span style={{ fontSize: 9, color: 'var(--text-3)' }}>
             {graphPath.message || 'No matching entities found'}
           </span>
         ) : (
@@ -36,7 +36,7 @@ function GraphPathBadge({ graphPath }) {
           </span>
         )}
         {!noSeeds && (
-          <span style={{ fontSize: 9, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+          <span style={{ fontSize: 9, color: 'var(--text-3)', marginLeft: 'auto' }}>
             {nodes.length} nodes · {chunks_found} chunks {open ? '\u25B2' : '\u25BC'}
           </span>
         )}

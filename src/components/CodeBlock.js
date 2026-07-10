@@ -35,7 +35,7 @@ function CodeBlock({ language, children }) {
         customStyle={{
           margin: 0,
           padding: '14px',
-          background: 'var(--code-bg)',
+          background: 'var(--surface-2)',
           fontSize: '11.5px',
           lineHeight: '1.65',
         }}

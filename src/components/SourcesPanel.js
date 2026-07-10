@@ -19,7 +19,7 @@ function SourcesPanel({ sources, onViewPdf }) {
           {sources.map((s, i) => (
             <div key={i} className={'source-card' + (expanded[i] ? ' expanded' : '')} onClick={() => toggle(i)}>
               <div className="source-card-header">
-                <FileCode size={12} style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
+                <FileCode size={12} style={{ color: 'var(--accent)', flexShrink: 0 }} />
                 <span className="source-card-file">{s.file}</span>
                 {s.page && (
                   <span
@@ -34,7 +34,7 @@ function SourcesPanel({ sources, onViewPdf }) {
                 )}
                 <span className="source-card-score">{(s.score * 100).toFixed(0)}%</span>
                 {s.search_type && (
-                  <span style={{ fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                  <span style={{ fontSize: 9, color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>
                     {s.search_type}
                   </span>
                 )}

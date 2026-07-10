@@ -11,8 +11,8 @@ function DecomposedBadge({ subQueries }) {
         onClick={() => setOpen((o) => !o)}
         title="Query was decomposed into sub-queries"
       >
-        <Layers size={10} style={{ color: 'var(--neon-cyan)' }} />
-        <span style={{ color: 'var(--neon-cyan)', fontSize: 10 }}>Decomposed</span>
+        <Layers size={10} style={{ color: 'var(--accent)' }} />
+        <span style={{ color: 'var(--accent)', fontSize: 10 }}>Decomposed</span>
         <span className="gpath-seed-chips">
           {subQueries.map((_sq, i) => (
             <span key={i} className="gpath-chip gpath-seed">
@@ -20,7 +20,7 @@ function DecomposedBadge({ subQueries }) {
             </span>
           ))}
         </span>
-        <span style={{ fontSize: 9, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+        <span style={{ fontSize: 9, color: 'var(--text-3)', marginLeft: 'auto' }}>
           {subQueries.length} sub-queries {open ? '\u25B2' : '\u25BC'}
         </span>
       </button>
@@ -33,7 +33,7 @@ function DecomposedBadge({ subQueries }) {
                 <span className="gpath-chip gpath-seed" style={{ minWidth: 18, textAlign: 'center' }}>
                   {i + 1}
                 </span>
-                <span style={{ fontSize: 10, color: 'var(--text-secondary)', lineHeight: 1.4 }}>{sq}</span>
+                <span style={{ fontSize: 10, color: 'var(--text-2)', lineHeight: 1.4 }}>{sq}</span>
               </div>
             ))}
           </div>

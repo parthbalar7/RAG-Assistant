@@ -2,25 +2,38 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Network, RefreshCw, ZoomIn, X } from 'lucide-react';
 import { api } from '../utils/api';
 
-const GRAPH_COLORS = [
-  '#00f0ff',
-  '#a855f7',
-  '#f59e0b',
-  '#34d399',
-  '#f87171',
-  '#60a5fa',
-  '#fb923c',
-  '#e879f9',
-  '#a3e635',
-  '#38bdf8',
-  '#f472b6',
-  '#4ade80',
-];
+// Community palette from docs/UI_DESIGN.md §6 — six desaturated hues that read
+// on both themes. Nodes without a community fall back to --accent.
+const COMMUNITY_PALETTE = ['#7E93B8', '#8FAE93', '#C2AC77', '#B08A9E', '#7FA6A8', '#A08D7B'];
 
-// Colour by Louvain community when the backend provides one (community >= 0);
-// fall back to the per-document colour for graphs built before communities.
-const nodeColor = (n) =>
-  GRAPH_COLORS[(typeof n.community === 'number' && n.community >= 0 ? n.community : n.color_idx) % GRAPH_COLORS.length];
+// Canvas colour: needs a concrete value (canvas cannot consume var() strings).
+const communityColor = (n, accent) =>
+  typeof n.community === 'number' && n.community >= 0
+    ? COMMUNITY_PALETTE[n.community % COMMUNITY_PALETTE.length]
+    : accent;
+
+// CSS colour for JSX (legend dots, selected-node popover).
+const communityColorCss = (n) =>
+  typeof n.community === 'number' && n.community >= 0
+    ? COMMUNITY_PALETTE[n.community % COMMUNITY_PALETTE.length]
+    : 'var(--accent)';
+
+// Resolve theme tokens to concrete values for canvas drawing. Re-read whenever
+// data-theme changes (a MutationObserver invalidates the cache).
+const readTokens = () => {
+  const root = document.documentElement;
+  const cs = getComputedStyle(root);
+  const get = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+  return {
+    bg: get('--bg', '#f7f6f2'),
+    surface: get('--surface', '#ffffff'),
+    text2: get('--text-2', '#5d5b54'),
+    text3: get('--text-3', '#98958b'),
+    accent: get('--accent', '#4e5f7e'),
+    fontBody: get('--font-body', 'sans-serif'),
+    edgeAlpha: root.dataset.theme === 'dark' ? 0.4 : 0.3,
+  };
+};
 
 function GraphPanel({ token, onToast, isReady }) {
   const canvasRef = useRef(null);
@@ -28,6 +41,7 @@ function GraphPanel({ token, onToast, isReady }) {
   const viewRef = useRef({ x: 0, y: 0, scale: 1 });
   const dragRef = useRef(null);
   const hoveredRef = useRef(null); // tracks hovered node without re-render
+  const tokensRef = useRef(null); // resolved theme tokens for canvas drawing
   const [graphData, setGraphData] = useState(null);
   const [stats, setStats] = useState(null);
   const [building, setBuilding] = useState(false);
@@ -44,6 +58,17 @@ function GraphPanel({ token, onToast, isReady }) {
   useEffect(() => {
     fetchStats();
   }, [fetchStats]);
+
+  // Re-resolve canvas tokens and repaint when the theme flips.
+  useEffect(() => {
+    const obs = new MutationObserver(() => {
+      tokensRef.current = null;
+      const sim = simRef.current;
+      if (!sim.raf && sim.tick) sim.raf = requestAnimationFrame(sim.tick);
+    });
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => obs.disconnect();
+  }, []);
 
   const handleBuild = async () => {
     if (!isReady) {
@@ -86,7 +111,7 @@ function GraphPanel({ token, onToast, isReady }) {
     canvas.width = W;
     canvas.height = H;
 
-    // Legend: Louvain communities (themes) when present, else document -> color
+    // Legend: Louvain communities (themes) when present
     const commCounts = {};
     graphData.nodes.forEach((n) => {
       if (typeof n.community === 'number' && n.community >= 0)
@@ -96,24 +121,19 @@ function GraphPanel({ token, onToast, isReady }) {
       setDocLegend(
         Object.entries(commCounts)
           .sort((a, b) => b[1] - a[1])
-          .slice(0, GRAPH_COLORS.length)
+          .slice(0, COMMUNITY_PALETTE.length)
           .map(([cid, count]) => ({
             label: `theme ${Number(cid) + 1} (${count})`,
-            color: GRAPH_COLORS[Number(cid) % GRAPH_COLORS.length],
+            color: COMMUNITY_PALETTE[Number(cid) % COMMUNITY_PALETTE.length],
           })),
       );
     } else {
-      const docMap = {};
-      graphData.nodes.forEach((n) => {
-        if (n.doc && !(n.doc in docMap)) docMap[n.doc] = n.color_idx;
-      });
-      setDocLegend(
-        Object.entries(docMap).map(([doc, idx]) => ({
-          label: doc.split(/[\\/]/).pop(), // just filename
-          color: GRAPH_COLORS[idx % GRAPH_COLORS.length],
-        })),
-      );
+      setDocLegend([]); // no communities → all nodes accent, nothing to distinguish
     }
+
+    // Labels are reserved for top-degree nodes (roughly the ten best-connected).
+    const degrees = graphData.nodes.map((n) => n.degree || 0).sort((a, b) => b - a);
+    const labelThreshold = Math.max(2, degrees[Math.min(9, degrees.length - 1)] || 0);
 
     const MARGIN = 60;
     const nodeMap = {};
@@ -130,7 +150,7 @@ function GraphPanel({ token, onToast, isReady }) {
         y: MARGIN + row * cellH + cellH / 2 + (Math.random() - 0.5) * cellH * 0.5,
         vx: 0,
         vy: 0,
-        radius: Math.max(5, Math.min(14, 5 + n.degree * 1.2)),
+        radius: Math.max(4, Math.min(11, 4 + n.degree)), // 4–11px by degree
       };
       nodeMap[n.id] = node;
       return node;
@@ -220,109 +240,77 @@ function GraphPanel({ token, onToast, isReady }) {
       }
 
       // ── Draw ────────────────────────────────────────────────────────────────
+      const T = tokensRef.current || (tokensRef.current = readTokens());
       const { x: ox, y: oy, scale } = viewRef.current;
       const hov = hoveredRef.current;
       const sel = simRef.current._selected;
+      const focus = hov || sel;
+      const focusId = focus ? focus.id : null;
 
-      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = T.bg;
+      ctx.fillRect(0, 0, W, H);
       ctx.save();
       ctx.translate(ox, oy);
       ctx.scale(scale, scale);
 
-      // Edges
+      // Edges: 1px hairlines, text-3 at 30% (40% dark); the focused node's
+      // edges draw in full accent, the rest dim to 15%.
+      ctx.lineWidth = 1;
       for (const e of simEdges) {
-        const connected = hov && (e.source === hov || e.target === hov);
-        const baseAlpha = connected ? 0.9 : hov ? 0.08 : 0.35;
-        ctx.strokeStyle = connected ? `rgba(255,255,255,${baseAlpha})` : `rgba(120,130,150,${baseAlpha})`;
-        ctx.lineWidth = connected ? 1.5 : 0.8;
+        const connected = focus && (e.source.id === focusId || e.target.id === focusId);
+        ctx.strokeStyle = connected ? T.accent : T.text3;
+        ctx.globalAlpha = connected ? 1 : focus ? 0.15 : T.edgeAlpha;
         ctx.beginPath();
         ctx.moveTo(e.source.x, e.source.y);
         ctx.lineTo(e.target.x, e.target.y);
         ctx.stroke();
 
-        // Relation label on connected edges only
+        // Relation label on the focused node's edges only
         if (connected && e.rel) {
           const mx = (e.source.x + e.target.x) / 2;
           const my = (e.source.y + e.target.y) / 2;
           const relLabel = e.rel.replace(/_/g, ' ');
-          ctx.font = '9px monospace';
+          ctx.font = `10px ${T.fontBody}`;
           const tw = ctx.measureText(relLabel).width;
-          ctx.fillStyle = 'rgba(10,14,24,0.85)';
-          ctx.fillRect(mx - tw / 2 - 3, my - 8, tw + 6, 13);
-          ctx.fillStyle = 'rgba(200,210,230,0.9)';
-          ctx.fillText(relLabel, mx - tw / 2, my + 2);
+          ctx.fillStyle = T.bg;
+          ctx.fillRect(mx - tw / 2 - 3, my - 8, tw + 6, 14);
+          ctx.fillStyle = T.text2;
+          ctx.fillText(relLabel, mx - tw / 2, my + 3);
         }
       }
+      ctx.globalAlpha = 1;
 
-      // Nodes
+      // Nodes: filled circles, 1.5px surface ring; selection/hover = 2px accent ring
       for (const n of simNodes) {
-        const color = nodeColor(n);
-        const isHov = hov === n;
-        const isSel = sel && sel.id === n.id;
-        const dimmed = hov && !isHov;
+        const color = communityColor(n, T.accent);
+        const isFocus = focus && n.id === focusId;
+        ctx.globalAlpha = focus && !isFocus ? 0.15 : 1;
 
-        ctx.globalAlpha = dimmed ? 0.25 : 1;
-
-        // Outer glow ring for hovered/selected
-        if (isHov || isSel) {
-          ctx.beginPath();
-          ctx.arc(n.x, n.y, n.radius + 5, 0, Math.PI * 2);
-          ctx.strokeStyle = color + '55';
-          ctx.lineWidth = 3;
-          ctx.stroke();
-        }
-
-        // Node fill
         ctx.beginPath();
         ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-        ctx.fillStyle = color + (isHov || isSel ? 'ee' : '88');
+        ctx.fillStyle = color;
         ctx.fill();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = isHov || isSel ? 2 : 1;
+        ctx.strokeStyle = T.surface;
+        ctx.lineWidth = 1.5;
         ctx.stroke();
 
-        ctx.globalAlpha = 1;
-
-        // Label: always show for hovered/selected, or degree >= 2
-        const showLabel = isHov || isSel || (n.degree >= 2 && !dimmed);
-        if (showLabel) {
-          const label = n.label.length > 22 ? n.label.slice(0, 21) + '\u2026' : n.label;
-          const fontSize = isHov || isSel ? 11 : Math.max(9, Math.min(10, 8 + n.degree * 0.4));
-          ctx.font = `${isHov || isSel ? 'bold ' : ''}${fontSize}px monospace`;
-          const tw = ctx.measureText(label).width;
-          const lx = n.x + n.radius + 5;
-          const ly = n.y + 4;
-
-          // Label background pill
-          ctx.fillStyle = 'rgba(8, 12, 22, 0.88)';
+        if (isFocus) {
           ctx.beginPath();
-          const pad = 3;
-          ctx.roundRect
-            ? ctx.roundRect(lx - pad, ly - fontSize, tw + pad * 2, fontSize + 4, 3)
-            : ctx.rect(lx - pad, ly - fontSize, tw + pad * 2, fontSize + 4);
-          ctx.fill();
-
-          // Label border
-          ctx.strokeStyle = color + '44';
-          ctx.lineWidth = 0.5;
+          ctx.arc(n.x, n.y, n.radius + 2.5, 0, Math.PI * 2);
+          ctx.strokeStyle = T.accent;
+          ctx.lineWidth = 2;
           ctx.stroke();
-
-          // Label text
-          ctx.fillStyle = isHov || isSel ? color : 'rgba(210,220,235,0.95)';
-          ctx.fillText(label, lx, ly);
         }
 
-        // Type badge for hovered/selected
-        if ((isHov || isSel) && n.type) {
-          ctx.font = '8px monospace';
-          const badge = n.type;
-          const bw = ctx.measureText(badge).width;
-          ctx.fillStyle = 'rgba(8,12,22,0.9)';
-          ctx.fillRect(n.x - bw / 2 - 4, n.y + n.radius + 3, bw + 8, 12);
-          ctx.fillStyle = color + 'cc';
-          ctx.fillText(badge, n.x - bw / 2, n.y + n.radius + 12);
+        // Labels: top-degree nodes and the hovered/selected node only
+        if (isFocus || n.degree >= labelThreshold) {
+          const label = n.label.length > 24 ? n.label.slice(0, 23) + '…' : n.label;
+          ctx.font = `11px ${T.fontBody}`;
+          ctx.fillStyle = T.text2;
+          ctx.fillText(label, n.x + n.radius + 6, n.y + 4);
         }
       }
+      ctx.globalAlpha = 1;
 
       ctx.restore();
       if (sim.alpha > 0 || hoveredRef.current || dragRef.current) {
@@ -409,173 +397,169 @@ function GraphPanel({ token, onToast, isReady }) {
     restartLoop();
   };
 
+  const hasGraph = stats && stats.nodes > 0;
+  const chipBtnStyle = { height: 24, padding: '0 8px', fontSize: 11, gap: 5 };
+
   return (
     <div className="panel-content" style={{ display: 'flex', flexDirection: 'column', gap: 8, height: '100%' }}>
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Network size={13} style={{ color: 'var(--neon-cyan)' }} />
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>Knowledge Graph</span>
-        {stats && stats.nodes > 0 && (
-          <span
-            style={{ fontSize: 9, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', marginLeft: 'auto' }}
-          >
-            {stats.nodes}N · {stats.edges}E · {stats.documents}D
+        <Network size={13} style={{ color: 'var(--accent)' }} />
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)' }}>Knowledge Graph</span>
+        {hasGraph && (
+          <span style={{ fontSize: 11, color: 'var(--text-3)', marginLeft: 'auto' }}>
+            {stats.nodes} nodes · {stats.edges} edges · {stats.documents} docs
           </span>
         )}
       </div>
 
-      {/* Controls */}
-      <div style={{ display: 'flex', gap: 6 }}>
-        <button
-          className="sl-footer-btn"
-          style={{
-            flex: 1,
-            justifyContent: 'center',
-            color: building ? 'var(--text-tertiary)' : 'var(--neon-cyan)',
-            borderColor: 'var(--border-neon)',
-          }}
-          onClick={handleBuild}
-          disabled={building}
-        >
-          <RefreshCw size={11} style={{ animation: building ? 'spin 1s linear infinite' : 'none' }} />
-          {building ? 'Building\u2026' : stats && stats.nodes > 0 ? 'Rebuild' : 'Build Graph'}
-        </button>
-        {stats && stats.nodes > 0 && !graphData && (
-          <button className="sl-footer-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={handleLoad}>
-            <Network size={11} /> View
-          </button>
-        )}
-        {graphData && (
-          <button className="sl-footer-btn" onClick={resetView} title="Reset pan/zoom">
-            <ZoomIn size={11} />
-          </button>
-        )}
-      </div>
-
-      {/* Canvas */}
       {graphData && graphData.nodes.length > 0 ? (
-        <div style={{ flex: 1, position: 'relative', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <canvas
-            ref={canvasRef}
-            style={{
-              flex: 1,
-              width: '100%',
-              display: 'block',
-              background: '#080c16',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border)',
-              minHeight: 0,
-            }}
-            onMouseDown={onMouseDown}
-            onMouseMove={onMouseMove}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseLeave}
-            onWheel={onWheel}
-          />
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+            <canvas
+              ref={canvasRef}
+              style={{
+                width: '100%',
+                height: '100%',
+                display: 'block',
+                background: 'var(--bg)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border)',
+              }}
+              onMouseDown={onMouseDown}
+              onMouseMove={onMouseMove}
+              onMouseUp={onMouseUp}
+              onMouseLeave={onMouseLeave}
+              onWheel={onWheel}
+            />
 
-          {/* Document colour legend */}
+            {/* Controls — compact ghost buttons in a top-right surface chip row */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 8,
+                right: 8,
+                display: 'flex',
+                gap: 2,
+                padding: 2,
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+              }}
+            >
+              <button className="sl-footer-btn" style={chipBtnStyle} onClick={handleBuild} disabled={building}>
+                <RefreshCw size={11} style={building ? { animation: 'spin 0.8s linear infinite' } : undefined} />
+                {building ? 'Building…' : 'Rebuild'}
+              </button>
+              <button className="sl-footer-btn" style={chipBtnStyle} onClick={resetView} title="Reset pan/zoom">
+                <ZoomIn size={11} /> Fit
+              </button>
+            </div>
+
+            {/* Selected node — popover */}
+            {selectedNode && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 8,
+                  right: 8,
+                  bottom: 8,
+                  background: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-pop)',
+                  padding: '8px 12px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <span
+                    style={{
+                      width: 9,
+                      height: 9,
+                      borderRadius: '50%',
+                      background: communityColorCss(selectedNode),
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: 'var(--text-1)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {selectedNode.label}
+                  </span>
+                  {selectedNode.type && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: 'var(--text-3)',
+                        background: 'var(--surface-2)',
+                        padding: '1px 6px',
+                        borderRadius: 'var(--radius-sm)',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {selectedNode.type}
+                    </span>
+                  )}
+                  <button
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: 'var(--text-3)',
+                      padding: 0,
+                      flexShrink: 0,
+                      display: 'flex',
+                    }}
+                    onClick={() => {
+                      simRef.current._selected = null;
+                      setSelectedNode(null);
+                    }}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                  {selectedNode.degree} connection{selectedNode.degree !== 1 ? 's' : ''} · {selectedNode.chunk_count}{' '}
+                  chunk{selectedNode.chunk_count !== 1 ? 's' : ''}
+                </div>
+                {selectedNode.doc && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--text-3)',
+                      marginTop: 3,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {selectedNode.doc}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Community legend */}
           {docLegend.length > 1 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', padding: '4px 2px' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', padding: '0 2px' }}>
               {docLegend.map(({ label, color }) => (
                 <span
                   key={label}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    fontSize: 9,
-                    color: 'var(--text-tertiary)',
-                    fontFamily: 'var(--font-mono)',
-                  }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-3)' }}
                 >
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
-                  {label.length > 24 ? '\u2026' + label.slice(-22) : label}
+                  {label}
                 </span>
               ))}
-            </div>
-          )}
-
-          {/* Selected node card */}
-          {selectedNode && (
-            <div
-              style={{
-                background: 'var(--bg-surface)',
-                border: `1px solid ${nodeColor(selectedNode)}55`,
-                borderRadius: 'var(--radius-md)',
-                padding: '8px 12px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                <span
-                  style={{
-                    width: 9,
-                    height: 9,
-                    borderRadius: '50%',
-                    background: nodeColor(selectedNode),
-                    flexShrink: 0,
-                  }}
-                />
-                <span
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: 'var(--text-primary)',
-                    fontFamily: 'var(--font-mono)',
-                    flex: 1,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {selectedNode.label}
-                </span>
-                <span
-                  style={{
-                    fontSize: 9,
-                    color: 'var(--text-tertiary)',
-                    background: 'var(--glass)',
-                    padding: '1px 6px',
-                    borderRadius: 6,
-                    flexShrink: 0,
-                  }}
-                >
-                  {selectedNode.type}
-                </span>
-                <button
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'var(--text-tertiary)',
-                    padding: 0,
-                    flexShrink: 0,
-                  }}
-                  onClick={() => {
-                    simRef.current._selected = null;
-                    setSelectedNode(null);
-                  }}
-                >
-                  <X size={12} />
-                </button>
-              </div>
-              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
-                {selectedNode.degree} connection{selectedNode.degree !== 1 ? 's' : ''} · {selectedNode.chunk_count}{' '}
-                chunk{selectedNode.chunk_count !== 1 ? 's' : ''}
-              </div>
-              {selectedNode.doc && (
-                <div
-                  style={{
-                    fontSize: 9,
-                    color: 'var(--text-tertiary)',
-                    marginTop: 3,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {selectedNode.doc}
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -588,20 +572,35 @@ function GraphPanel({ token, onToast, isReady }) {
             alignItems: 'center',
             justifyContent: 'center',
             gap: 8,
-            color: 'var(--text-tertiary)',
-            fontSize: 12,
             textAlign: 'center',
+            padding: 16,
           }}
         >
-          <Network size={32} style={{ opacity: 0.2 }} />
-          <div>
-            Click <strong>Build Graph</strong> to extract entities
+          <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-2)' }}>
+            {hasGraph ? 'Graph ready' : 'No knowledge graph yet'}
           </div>
-          <div style={{ fontSize: 10, opacity: 0.7 }}>
-            Maps concepts, functions &amp; relationships
+          <div style={{ fontSize: 13, color: 'var(--text-3)' }}>
+            Maps concepts, functions and relationships
             <br />
             across your indexed documents
           </div>
+          <button
+            className="modal-btn cancel"
+            style={{ marginTop: 8 }}
+            onClick={hasGraph ? handleLoad : handleBuild}
+            disabled={building}
+          >
+            {building ? (
+              <>
+                <RefreshCw size={13} style={{ animation: 'spin 0.8s linear infinite' }} />
+                Building{'…'}
+              </>
+            ) : hasGraph ? (
+              'View graph'
+            ) : (
+              'Build graph'
+            )}
+          </button>
         </div>
       )}
     </div>

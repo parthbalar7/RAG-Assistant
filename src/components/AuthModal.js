@@ -30,45 +30,67 @@ function AuthModal({ onClose, onAuth, required }) {
     <div className="modal-overlay" onClick={required ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 400 }}>
         <h2>{tab === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
-        <p>
+        <p style={{ marginBottom: 14 }}>
           {required
             ? 'Sign in or register to use RAG Assistant.'
             : 'Sign in to save your chat history and preferences.'}
         </p>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
           <button
-            className={'modal-btn ' + (tab === 'login' ? 'confirm' : 'cancel')}
-            style={{ flex: 1 }}
+            className="modal-btn cancel"
+            style={
+              tab === 'login'
+                ? {
+                    flex: 1,
+                    justifyContent: 'center',
+                    background: 'var(--accent-tint)',
+                    color: 'var(--accent)',
+                    borderColor: 'var(--accent)',
+                  }
+                : { flex: 1, justifyContent: 'center' }
+            }
             onClick={() => setTab('login')}
           >
             Login
           </button>
           <button
-            className={'modal-btn ' + (tab === 'register' ? 'confirm' : 'cancel')}
-            style={{ flex: 1 }}
+            className="modal-btn cancel"
+            style={
+              tab === 'register'
+                ? {
+                    flex: 1,
+                    justifyContent: 'center',
+                    background: 'var(--accent-tint)',
+                    color: 'var(--accent)',
+                    borderColor: 'var(--accent)',
+                  }
+                : { flex: 1, justifyContent: 'center' }
+            }
             onClick={() => setTab('register')}
           >
             Register
           </button>
         </div>
-        <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submit();
-          }}
-        />
-        {tab === 'register' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} />
           <input
-            type="text"
-            placeholder="Display name (optional)"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit();
+            }}
           />
-        )}
+          {tab === 'register' && (
+            <input
+              type="text"
+              placeholder="Display name (optional)"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
+          )}
+        </div>
         {error && (
           <div className="result-banner error">
             <AlertCircle size={12} /> {error}

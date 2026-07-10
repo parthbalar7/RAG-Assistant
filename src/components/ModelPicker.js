@@ -55,11 +55,11 @@ function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
           left: Math.max(8, rect.left),
           minWidth: 230,
           zIndex: 9999,
-          background: 'var(--bg-panel)',
-          border: '1px solid var(--border-neon)',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
           borderRadius: 'var(--radius-md)',
           overflow: 'hidden',
-          boxShadow: '0 -8px 32px rgba(0,0,0,0.7)',
+          boxShadow: 'var(--shadow-pop)',
         }}
       >
         {/* Backend tabs */}
@@ -80,10 +80,9 @@ function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
                 fontSize: 11,
                 border: 'none',
                 cursor: 'pointer',
-                background: backend === k ? 'var(--accent-soft)' : 'transparent',
-                color: backend === k ? 'var(--neon-cyan)' : 'var(--text-tertiary)',
+                background: backend === k ? 'var(--accent-tint)' : 'transparent',
+                color: backend === k ? 'var(--accent)' : 'var(--text-3)',
                 fontFamily: 'var(--font-mono)',
-                transition: 'background 0.15s',
               }}
             >
               {label}
@@ -109,17 +108,17 @@ function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
                   display: 'flex',
                   alignItems: 'center',
                   gap: 6,
-                  color: isActive ? 'var(--neon-cyan)' : 'var(--text-secondary)',
-                  background: isActive ? 'var(--accent-soft)' : 'transparent',
+                  color: isActive ? 'var(--accent)' : 'var(--text-2)',
+                  background: isActive ? 'var(--accent-tint)' : 'transparent',
                 }}
                 onMouseEnter={(e) => {
-                  if (!isActive) e.currentTarget.style.background = 'var(--bg-hover)';
+                  if (!isActive) e.currentTarget.style.background = 'var(--surface-2)';
                 }}
                 onMouseLeave={(e) => {
                   if (!isActive) e.currentTarget.style.background = 'transparent';
                 }}
               >
-                <span style={{ width: 12, fontSize: 10, color: 'var(--neon-cyan)' }}>{isActive ? '\u2713' : ''}</span>
+                <span style={{ width: 12, fontSize: 10, color: 'var(--accent)' }}>{isActive ? '\u2713' : ''}</span>
                 {m.label}
               </div>
             );
@@ -131,7 +130,7 @@ function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
             style={{
               padding: '5px 14px',
               fontSize: 10,
-              color: llmStatus.ollama_reachable ? 'var(--neon-green)' : 'var(--warm)',
+              color: llmStatus.ollama_reachable ? 'var(--ok)' : 'var(--warn)',
               borderTop: '1px solid var(--border)',
               fontFamily: 'var(--font-mono)',
             }}
@@ -157,7 +156,7 @@ function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
           padding: '0 7px',
           fontSize: 10,
           fontFamily: 'var(--font-mono)',
-          color: 'var(--text-secondary)',
+          color: 'var(--text-2)',
           minWidth: 0,
         }}
       >
@@ -165,10 +164,7 @@ function ModelPicker({ llmStatus, ollamaModels, onFetchModels, onSwitch }) {
         <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {shortName}
         </span>
-        <ChevronDown
-          size={9}
-          style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}
-        />
+        <ChevronDown size={9} style={{ flexShrink: 0 }} />
       </button>
       {dropdown}
     </>

@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { GitBranch, ShieldCheck, ShieldAlert, ShieldOff } from 'lucide-react';
 
 const RISK_META = {
-  sourced: { icon: ShieldCheck, color: 'var(--neon-cyan)', bg: 'rgba(0,240,255,0.08)', label: 'sourced' },
-  inferred: { icon: ShieldAlert, color: '#f59e0b', bg: 'rgba(245,158,11,0.08)', label: 'inferred' },
-  orphan: { icon: ShieldOff, color: 'var(--neon-red)', bg: 'rgba(255,80,80,0.08)', label: 'orphan' },
+  sourced: { icon: ShieldCheck, color: 'var(--ok)', label: 'sourced' },
+  inferred: { icon: ShieldAlert, color: 'var(--warn)', label: 'inferred' },
+  orphan: { icon: ShieldOff, color: 'var(--danger)', label: 'orphan' },
 };
 
 function ProvenanceBadge({ provenance }) {
@@ -16,7 +16,7 @@ function ProvenanceBadge({ provenance }) {
   if (total === 0) return null;
 
   const riskColor =
-    orphan_count / total > 0.4 ? 'var(--neon-red)' : orphan_count / total > 0.15 ? '#f59e0b' : 'var(--neon-cyan)';
+    orphan_count / total > 0.4 ? 'var(--danger)' : orphan_count / total > 0.15 ? 'var(--warn)' : 'var(--ok)';
 
   return (
     <div className="prov-container">
@@ -29,9 +29,7 @@ function ProvenanceBadge({ provenance }) {
         <span className="prov-pill prov-sourced">{sourced_count} sourced</span>
         {inferred_count > 0 && <span className="prov-pill prov-inferred">{inferred_count} inferred</span>}
         {orphan_count > 0 && <span className="prov-pill prov-orphan">{orphan_count} orphan</span>}
-        <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text-tertiary)' }}>
-          {open ? '\u25B2' : '\u25BC'}
-        </span>
+        <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text-3)' }}>{open ? '\u25B2' : '\u25BC'}</span>
       </button>
 
       {open && (
@@ -45,7 +43,6 @@ function ProvenanceBadge({ provenance }) {
                 <div
                   key={i}
                   className={'prov-sent ' + (isActive ? 'prov-sent-active' : '')}
-                  style={{ borderLeftColor: meta.color, background: isActive ? meta.bg : 'transparent' }}
                   onClick={() => setActiveSent(isActive ? null : i)}
                 >
                   <div className="prov-sent-header">
@@ -77,13 +74,13 @@ function ProvenanceBadge({ provenance }) {
           </div>
           <div className="prov-legend">
             <span>
-              <ShieldCheck size={9} style={{ color: 'var(--neon-cyan)' }} /> sourced &lt;35% novel
+              <ShieldCheck size={9} style={{ color: 'var(--ok)' }} /> sourced &lt;35% novel
             </span>
             <span>
-              <ShieldAlert size={9} style={{ color: '#f59e0b' }} /> inferred 35-65%
+              <ShieldAlert size={9} style={{ color: 'var(--warn)' }} /> inferred 35-65%
             </span>
             <span>
-              <ShieldOff size={9} style={{ color: 'var(--neon-red)' }} /> orphan &gt;65%
+              <ShieldOff size={9} style={{ color: 'var(--danger)' }} /> orphan &gt;65%
             </span>
           </div>
         </div>

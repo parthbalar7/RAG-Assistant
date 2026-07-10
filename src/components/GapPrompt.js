@@ -91,7 +91,7 @@ function GapPrompt({ gap, query, token, contextRef, onIngested, onRefreshEvent }
       {state === 'idle' && (
         <>
           <div className="gap-prompt-body">
-            <Search size={11} style={{ color: 'var(--neon-cyan)', flexShrink: 0 }} />
+            <Search size={11} style={{ color: 'var(--accent)', flexShrink: 0 }} />
             <span>
               <strong>Limited coverage</strong> — {gap.reason} Search the web for <em>"{gap.topic}"</em> and add it to
               your index?
@@ -111,7 +111,7 @@ function GapPrompt({ gap, query, token, contextRef, onIngested, onRefreshEvent }
         <div className="gap-prompt-body">
           <RefreshCw
             size={11}
-            style={{ color: 'var(--neon-cyan)', animation: 'spin 1s linear infinite', flexShrink: 0 }}
+            style={{ color: 'var(--accent)', animation: 'spin 0.8s linear infinite', flexShrink: 0 }}
           />
           <span>
             Searching the web for <em>"{gap.topic}"</em>...{round > 1 ? ` (round ${round})` : ''}
@@ -122,7 +122,7 @@ function GapPrompt({ gap, query, token, contextRef, onIngested, onRefreshEvent }
         <div className="gap-prompt-body">
           <RefreshCw
             size={11}
-            style={{ color: 'var(--neon-cyan)', animation: 'spin 1s linear infinite', flexShrink: 0 }}
+            style={{ color: 'var(--accent)', animation: 'spin 0.8s linear infinite', flexShrink: 0 }}
           />
           <span>
             Added <strong>{result.chunks_added} chunks</strong> — refreshing answer from web results...
@@ -131,7 +131,7 @@ function GapPrompt({ gap, query, token, contextRef, onIngested, onRefreshEvent }
       )}
       {state === 'done' && result && (
         <div className="gap-prompt-body">
-          <CheckCircle2 size={11} style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+          <CheckCircle2 size={11} style={{ color: 'var(--ok)', flexShrink: 0 }} />
           <span>
             <strong>Answer refreshed from web results</strong> — {result.chunks_added} chunks from{' '}
             {result.urls?.length || 0} source(s).
@@ -140,7 +140,7 @@ function GapPrompt({ gap, query, token, contextRef, onIngested, onRefreshEvent }
       )}
       {state === 'error' && (
         <div className="gap-prompt-body">
-          <AlertCircle size={11} style={{ color: 'var(--neon-red, #ff4d4d)', flexShrink: 0 }} />
+          <AlertCircle size={11} style={{ color: 'var(--danger)', flexShrink: 0 }} />
           <span>{result?.error || 'Web search failed.'}</span>
         </div>
       )}

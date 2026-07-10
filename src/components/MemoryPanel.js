@@ -126,20 +126,19 @@ function MemoryPanel({ token, onToast }) {
   };
 
   const typeColors = {
-    fact: { bg: 'rgba(0,240,255,0.08)', color: 'var(--neon-cyan)', border: 'rgba(0,240,255,0.2)' },
-    key_fact: { bg: 'rgba(0,240,255,0.08)', color: 'var(--neon-cyan)', border: 'rgba(0,240,255,0.2)' },
-    pref: { bg: 'rgba(168,85,247,0.08)', color: 'var(--neon-purple)', border: 'rgba(168,85,247,0.2)' },
-    user_preference: { bg: 'rgba(168,85,247,0.08)', color: 'var(--neon-purple)', border: 'rgba(168,85,247,0.2)' },
-    decision: { bg: 'rgba(34,245,160,0.08)', color: 'var(--neon-green)', border: 'rgba(34,245,160,0.2)' },
-    insight: { bg: 'rgba(245,158,11,0.08)', color: 'var(--warm)', border: 'rgba(245,158,11,0.2)' },
-    summary: { bg: 'rgba(244,63,158,0.08)', color: 'var(--neon-pink)', border: 'rgba(244,63,158,0.2)' },
-    conversation_summary: { bg: 'rgba(244,63,158,0.08)', color: 'var(--neon-pink)', border: 'rgba(244,63,158,0.2)' },
+    fact: { bg: 'var(--accent-tint)', color: 'var(--accent)' },
+    key_fact: { bg: 'var(--accent-tint)', color: 'var(--accent)' },
+    pref: { bg: 'var(--accent-tint)', color: 'var(--accent)' },
+    user_preference: { bg: 'var(--accent-tint)', color: 'var(--accent)' },
+    decision: { bg: 'var(--surface-2)', color: 'var(--ok)' },
+    insight: { bg: 'var(--surface-2)', color: 'var(--warn)' },
+    summary: { bg: 'var(--surface-2)', color: 'var(--text-2)' },
+    conversation_summary: { bg: 'var(--surface-2)', color: 'var(--text-2)' },
   };
   const typeLabel = (t) => (t || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   const displayList = searchResults !== null ? searchResults : memories;
 
-  if (loading)
-    return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-tertiary)' }}>Loading memories...</div>;
+  if (loading) return <div style={{ padding: 16, fontSize: 12, color: 'var(--text-3)' }}>Loading memories...</div>;
 
   return (
     <div>
@@ -167,10 +166,9 @@ function MemoryPanel({ token, onToast }) {
                 style={{
                   fontSize: 9,
                   padding: '2px 7px',
-                  borderRadius: 10,
+                  borderRadius: 'var(--radius-sm)',
                   background: c.bg,
                   color: c.color,
-                  border: '1px solid ' + c.border,
                   fontFamily: 'var(--font-mono)',
                 }}
               >
@@ -186,13 +184,13 @@ function MemoryPanel({ token, onToast }) {
             flex: 1,
             display: 'flex',
             alignItems: 'center',
-            background: 'var(--bg-surface)',
-            borderRadius: 'var(--radius-sm)',
+            background: 'var(--surface-2)',
+            borderRadius: 'var(--radius-md)',
             border: '1px solid var(--border)',
             padding: '0 8px',
           }}
         >
-          <Search size={12} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+          <Search size={12} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
           <input
             type="text"
             value={searchQuery}
@@ -209,7 +207,7 @@ function MemoryPanel({ token, onToast }) {
               flex: 1,
               border: 'none',
               background: 'transparent',
-              color: 'var(--text-primary)',
+              color: 'var(--text-1)',
               fontSize: 11,
               padding: '7px 6px',
               outline: 'none',
@@ -225,7 +223,7 @@ function MemoryPanel({ token, onToast }) {
               style={{
                 background: 'none',
                 border: 'none',
-                color: 'var(--text-tertiary)',
+                color: 'var(--text-3)',
                 cursor: 'pointer',
                 padding: 2,
               }}
@@ -240,9 +238,9 @@ function MemoryPanel({ token, onToast }) {
           style={{
             padding: '0 10px',
             borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--border-neon)',
-            background: 'var(--accent-soft)',
-            color: 'var(--neon-cyan)',
+            border: '1px solid var(--border)',
+            background: 'var(--accent-tint)',
+            color: 'var(--accent)',
             cursor: 'pointer',
             fontSize: 11,
           }}
@@ -251,7 +249,7 @@ function MemoryPanel({ token, onToast }) {
         </button>
       </div>
       {searchResults !== null && (
-        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8, fontFamily: 'var(--font-mono)' }}>
+        <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 8, fontFamily: 'var(--font-mono)' }}>
           {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for "{searchQuery}"
         </div>
       )}
@@ -267,7 +265,7 @@ function MemoryPanel({ token, onToast }) {
           <>
             <button
               className="sl-footer-btn"
-              style={{ justifyContent: 'center', borderColor: 'var(--border-neon)', color: 'var(--neon-purple)' }}
+              style={{ justifyContent: 'center', borderColor: 'var(--border)', color: 'var(--accent)' }}
               onClick={handleConsolidate}
               disabled={consolidating}
               title="Merge semantically related memories into fewer, richer ones"
@@ -285,11 +283,11 @@ function MemoryPanel({ token, onToast }) {
           style={{
             fontSize: 10,
             fontFamily: 'var(--font-mono)',
-            color: consolidateResult.merged > 0 ? 'var(--neon-green)' : 'var(--text-tertiary)',
+            color: consolidateResult.merged > 0 ? 'var(--ok)' : 'var(--text-3)',
             marginBottom: 10,
             padding: '6px 8px',
             borderRadius: 'var(--radius-sm)',
-            background: consolidateResult.merged > 0 ? 'rgba(34,245,160,0.06)' : 'var(--bg-surface)',
+            background: 'var(--surface-2)',
             border: '1px solid var(--border)',
           }}
         >
@@ -298,7 +296,7 @@ function MemoryPanel({ token, onToast }) {
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {displayList.length === 0 && (
-          <div style={{ textAlign: 'center', padding: 24, color: 'var(--text-tertiary)', fontSize: 12 }}>
+          <div style={{ textAlign: 'center', padding: 24, color: 'var(--text-3)', fontSize: 12 }}>
             <Brain size={28} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.3 }} />
             {stats.total === 0
               ? 'No memories yet. Chat with the assistant and memories will be extracted automatically.'
@@ -320,24 +318,23 @@ function MemoryPanel({ token, onToast }) {
                   style={{
                     fontSize: 9,
                     padding: '1px 6px',
-                    borderRadius: 8,
+                    borderRadius: 'var(--radius-sm)',
                     background: c.bg,
                     color: c.color,
-                    border: '1px solid ' + c.border,
                     fontFamily: 'var(--font-mono)',
                   }}
                 >
                   {typeLabel(mem.memory_type)}
                 </span>
                 {mem.similarity !== undefined && (
-                  <span style={{ fontSize: 9, color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)' }}>
+                  <span style={{ fontSize: 9, color: 'var(--accent)', fontFamily: 'var(--font-mono)' }}>
                     {(mem.similarity * 100).toFixed(0)}%
                   </span>
                 )}
                 <span
                   style={{
                     fontSize: 9,
-                    color: 'var(--text-tertiary)',
+                    color: 'var(--text-3)',
                     fontFamily: 'var(--font-mono)',
                     marginLeft: 'auto',
                   }}
@@ -346,14 +343,13 @@ function MemoryPanel({ token, onToast }) {
                   {'\u2606'.repeat(5 - Math.round((mem.importance || 0.5) * 5))}
                 </span>
               </div>
-              <div style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.55 }}>{mem.content}</div>
+              <div style={{ fontSize: 12, color: 'var(--text-1)', lineHeight: 1.55 }}>{mem.content}</div>
               {isExp && (
                 <div
                   style={{
                     marginTop: 8,
                     paddingTop: 8,
                     borderTop: '1px solid var(--border)',
-                    animation: 'fadeUp 0.2s ease',
                   }}
                 >
                   {mem.tags && (typeof mem.tags === 'string' ? JSON.parse(mem.tags || '[]') : mem.tags).length > 0 && (
@@ -365,8 +361,8 @@ function MemoryPanel({ token, onToast }) {
                             fontSize: 9,
                             padding: '1px 5px',
                             borderRadius: 6,
-                            background: 'var(--bg-subtle)',
-                            color: 'var(--text-secondary)',
+                            background: 'var(--surface-2)',
+                            color: 'var(--text-2)',
                             fontFamily: 'var(--font-mono)',
                           }}
                         >
@@ -379,7 +375,7 @@ function MemoryPanel({ token, onToast }) {
                     <div
                       style={{
                         fontSize: 10,
-                        color: 'var(--text-tertiary)',
+                        color: 'var(--text-3)',
                         fontFamily: 'var(--font-mono)',
                         marginBottom: 4,
                       }}
@@ -392,7 +388,7 @@ function MemoryPanel({ token, onToast }) {
                     <div
                       style={{
                         fontSize: 10,
-                        color: 'var(--text-tertiary)',
+                        color: 'var(--text-3)',
                         fontFamily: 'var(--font-mono)',
                         marginBottom: 6,
                       }}
@@ -409,9 +405,9 @@ function MemoryPanel({ token, onToast }) {
                     style={{
                       fontSize: 10,
                       padding: '3px 8px',
-                      borderRadius: 6,
-                      border: '1px solid rgba(239,68,68,0.2)',
-                      background: 'rgba(239,68,68,0.06)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: 'none',
+                      background: 'transparent',
                       color: 'var(--danger)',
                       cursor: 'pointer',
                       display: 'flex',
