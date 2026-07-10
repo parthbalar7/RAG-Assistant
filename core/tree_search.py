@@ -15,43 +15,37 @@ navigates the document like a human expert would.
 import json
 import logging
 import re
-from typing import Optional
-
-import anthropic
 
 from config import settings
+from core import llm_client
 
 logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════
-#  LLM Call Helper
+#  LLM Call Helper (backend-agnostic via llm_client)
 # ═══════════════════════════════════════════
 
+
 def _call_claude(system: str, prompt: str, max_tokens: int = 4096, temperature: float = 0.0) -> str:
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    resp = client.messages.create(
-        model=settings.llm_model,
-        max_tokens=max_tokens,
-        system=system,
+    return llm_client.chat(
         messages=[{"role": "user", "content": prompt}],
+        system=system,
+        max_tokens=max_tokens,
         temperature=temperature,
+        stream=False,
     )
-    return resp.content[0].text
 
 
 def _call_claude_stream(system: str, prompt: str, max_tokens: int = 4096, temperature: float = 0.1):
     """Streaming version — yields text chunks."""
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    with client.messages.stream(
-        model=settings.llm_model,
-        max_tokens=max_tokens,
-        system=system,
+    return llm_client.chat(
         messages=[{"role": "user", "content": prompt}],
+        system=system,
+        max_tokens=max_tokens,
         temperature=temperature,
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
+        stream=True,
+    )
 
 
 # ═══════════════════════════════════════════
@@ -118,8 +112,10 @@ def navigate_tree(query: str, tree_data: dict) -> dict:
             "confidence": "low",
         }
 
-    logger.info(f"Tree navigation: selected {len(result.get('selected_nodes', []))} nodes "
-                f"(confidence: {result.get('confidence', '?')})")
+    logger.info(
+        f"Tree navigation: selected {len(result.get('selected_nodes', []))} nodes "
+        f"(confidence: {result.get('confidence', '?')})"
+    )
     return result
 
 
@@ -134,7 +130,7 @@ def _tree_to_navigable_outline(nodes: list, indent: int = 0) -> str:
         ep = node.get("end_page", "?")
         summary = node.get("summary", "")
         summary_str = f" — {summary}" if summary else ""
-        lines.append(f"{prefix}[{nid}] {title} (pp. {sp}–{ep}){summary_str}")
+        lines.append(f"{prefix}[{nid}] {title} (pp. {sp}-{ep}){summary_str}")
         if node.get("children"):
             lines.append(_tree_to_navigable_outline(node["children"], indent + 1))
     return "\n".join(lines)
@@ -154,6 +150,7 @@ def _collect_all_node_ids(nodes: list) -> list:
 # ═══════════════════════════════════════════
 #  Step 2: Content Extraction
 # ═══════════════════════════════════════════
+
 
 def extract_content_for_nodes(tree_data: dict, node_ids: list) -> list[dict]:
     """Extract actual page text for the selected nodes.
@@ -187,14 +184,16 @@ def extract_content_for_nodes(tree_data: dict, node_ids: list) -> list[dict]:
                 seen_pages.add(p["page"])
 
         if node_text.strip():
-            results.append({
-                "node_id": nid,
-                "title": node.get("title", "Untitled"),
-                "start_page": start,
-                "end_page": end,
-                "pages": node_pages,
-                "text": node_text.strip(),
-            })
+            results.append(
+                {
+                    "node_id": nid,
+                    "title": node.get("title", "Untitled"),
+                    "start_page": start,
+                    "end_page": end,
+                    "pages": node_pages,
+                    "text": node_text.strip(),
+                }
+            )
 
     return results
 
@@ -219,7 +218,15 @@ RULES:
 2. Cite specific page numbers when possible, e.g. (p. 15)
 3. If the retrieved content doesn't contain the answer, say so clearly
 4. Be precise and thorough
-5. Structure your answer clearly"""
+
+FORMATTING (always follow):
+- Use **Markdown** for all responses.
+- Use ## headings to separate major sections or topics.
+- Use bullet points or numbered lists — never write long run-on paragraphs.
+- Use **bold** for key terms, names, titles, and important details.
+- Keep paragraphs short (2-3 sentences max).
+- Use tables when comparing or listing structured data (e.g. work experience, skills, dates).
+- Add blank lines between sections for readability."""
 
 ANSWER_PROMPT = """QUESTION: {query}
 
@@ -241,14 +248,14 @@ def generate_answer(
     stream: bool = False,
 ):
     """Step 3: Generate answer using retrieved content.
-    
+
     If stream=True, returns a generator yielding text chunks.
     If stream=False, returns a dict with answer and metadata.
     """
     sections_text = ""
     all_pages = []
     for sec in retrieved_sections:
-        sections_text += f"\n### [{sec['node_id']}] {sec['title']} (pp. {sec['start_page']}–{sec['end_page']})\n"
+        sections_text += f"\n### [{sec['node_id']}] {sec['title']} (pp. {sec['start_page']}-{sec['end_page']})\n"
         sections_text += sec["text"][:8000]  # Cap per section
         sections_text += "\n"
         all_pages.extend(sec["pages"])
@@ -256,8 +263,10 @@ def generate_answer(
     if not sections_text.strip():
         no_result = "I couldn't find relevant content in the document for this question. The tree search didn't identify matching sections."
         if stream:
+
             def empty_gen():
                 yield no_result
+
             return empty_gen()
         return {
             "answer": no_result,
@@ -281,9 +290,13 @@ def generate_answer(
     return {
         "answer": answer_text.strip(),
         "retrieved_nodes": [
-            {"node_id": s["node_id"], "title": s["title"],
-             "start_page": s["start_page"], "end_page": s["end_page"],
-             "text": s.get("text", "")}
+            {
+                "node_id": s["node_id"],
+                "title": s["title"],
+                "start_page": s["start_page"],
+                "end_page": s["end_page"],
+                "text": s.get("text", ""),
+            }
             for s in retrieved_sections
         ],
         "pages_referenced": sorted(set(all_pages)),
@@ -296,12 +309,13 @@ def generate_answer(
 #  Full Pipeline: Query → Answer
 # ═══════════════════════════════════════════
 
+
 def tree_search_query(
     query: str,
     tree_data: dict,
     stream: bool = False,
-    conversation_history: list = None,
-    search_query: str = None,
+    conversation_history: list | None = None,
+    search_query: str | None = None,
 ) -> dict:
     """Complete tree search pipeline:
     1. Navigate tree (LLM reasons about which branches)
@@ -358,14 +372,16 @@ def tree_search_query(
             "stream": result,
             "method": "tree_search",
             "retrieved_nodes": [
-                {"node_id": s["node_id"], "title": s["title"],
-                 "start_page": s["start_page"], "end_page": s["end_page"],
-                 "text": s.get("text", "")}
+                {
+                    "node_id": s["node_id"],
+                    "title": s["title"],
+                    "start_page": s["start_page"],
+                    "end_page": s["end_page"],
+                    "text": s.get("text", ""),
+                }
                 for s in sections
             ],
-            "pages_referenced": sorted(set(
-                p for s in sections for p in s["pages"]
-            )),
+            "pages_referenced": sorted(set(p for s in sections for p in s["pages"])),
             "confidence": nav_result.get("confidence", "medium"),
             "reasoning": nav_result.get("reasoning", ""),
         }

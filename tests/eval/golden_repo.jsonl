@@ -1,0 +1,20 @@
+{"question": "How does the system handle the optional step that occurs between the cross-encoder reranker and the memory retrieval phase?", "expected_paths": ["docs/indexing-and-retrieval.md"], "note": "generated"}
+{"question": "How does the function normalize numeric values and units found in the text to improve detection?", "expected_paths": ["core/integrity/scanner.py"], "note": "generated"}
+{"question": "How does the implementation ensure that the directory for the cache file exists before attempting to write the compressed data?", "expected_paths": ["core/embed_cache.py"], "note": "generated"}
+{"question": "How are edge relationships represented in the traversal output when a specific relation type is not explicitly defined for a connection?", "expected_paths": ["core/knowledge_graph.py"], "note": "generated"}
+{"question": "How does the system ensure that a new vector store is created only once per user ID while maintaining thread safety?", "expected_paths": ["api/dependencies.py"], "note": "generated"}
+{"question": "How does the system handle a request to retrieve a session that does not belong to the authenticated user?", "expected_paths": ["api/routers/sessions.py"], "note": "generated"}
+{"question": "When upserting a batch of text chunks into the vector store, how are metadata fields like document path, language, and line numbers prepared to ensure compatibility with ChromaDB's scalar-only requirements?", "expected_paths": ["core/retriever.py"], "note": "generated"}
+{"question": "How does the system handle failures during memory maintenance for specific users, such as when an external service like Ollama is unreachable?", "expected_paths": ["api/server.py"], "note": "generated"}
+{"question": "How are the 'counts', 'recommendations', 'fingerprints', and 'evidence' fields processed before being returned in the scan result?", "expected_paths": ["api/database.py"], "note": "generated"}
+{"question": "How does the system determine if the LLM explicitly stated it could not find the answer to the user's query?", "expected_paths": ["core/gap_analyzer.py"], "note": "generated"}
+{"question": "How can a developer verify whether the Ollama backend is reachable and which models are currently available?", "expected_paths": ["api/routers/llm.py"], "note": "generated"}
+{"question": "How can a developer retrieve a paginated list of stored fragments for a specific user, including the total count and the current enabled status?", "expected_paths": ["api/routers/memory.py"], "note": "generated"}
+{"question": "How does the system handle a JWT token that has passed its expiration time when attempting to retrieve the current user?", "expected_paths": ["api/auth.py"], "note": "generated"}
+{"question": "What happens to the memory retrieval result if the memory store is disabled in the settings?", "expected_paths": ["api/helpers.py"], "note": "generated"}
+{"question": "Under what specific condition does the process mark the entire operation as having failed after fetching pages?", "expected_paths": ["core/web_augmenter.py"], "note": "generated"}
+{"question": "When a request is processed with agent mode enabled, what specific information is included in the response object to describe the steps taken by the agent?", "expected_paths": ["api/routers/query.py"], "note": "generated"}
+{"question": "How does the system handle the request when the streaming flag is enabled versus when it is disabled?", "expected_paths": ["api/routers/pageindex.py"], "note": "generated"}
+{"question": "How does the code handle the extraction of images from a document, and what specific steps are taken to convert them into a format suitable for transmission?", "expected_paths": ["core/multimodal.py"], "note": "generated"}
+{"question": "When retrieving stored memories, how does the system handle the `last_accessed` timestamp if it is not explicitly provided in the metadata?", "expected_paths": ["core/memory.py"], "note": "generated"}
+{"question": "Under what conditions does the system invoke the page index query handler versus the RAG query handler?", "expected_paths": ["api/routers/websocket.py"], "note": "generated"}

@@ -5,9 +5,29 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.local
 *.log
 .vscode/
 .idea/
 frontend/node_modules/
 frontend/build/
 node_modules
+build/
+
+# Dev tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Test coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Distribution
+dist/
+*.egg-info/

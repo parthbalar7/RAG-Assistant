@@ -1,18 +1,23 @@
 import argparse
 import logging
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
+
+from api.database import init_db
 from config import settings
+from core.generator import Message, generate
 from core.ingestion import ingest_directory
 from core.retriever import VectorStore, retrieve
-from core.generator import generate, Message
-from api.database import init_db
 
 console = Console()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler("rag.log"), logging.StreamHandler()])
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=[logging.FileHandler("rag.log"), logging.StreamHandler()],
+)
 
 
 def cmd_ingest(args):
@@ -67,6 +72,7 @@ def cmd_chat(args):
 
 def cmd_serve(args):
     import uvicorn
+
     init_db()
     port = args.port or settings.api_port
     console.print(f"[bold blue]Starting API: http://localhost:{port}[/bold blue]")

@@ -32,3 +32,23 @@ frontend/build/
 *.egg-info/
 dist/
 build/
+
+# Dev tools (not needed in production image)
+tests/
+.github/
+Makefile
+.pre-commit-config.yaml
+requirements-dev.txt
+pyproject.toml
+.eslintrc.json
+.prettierrc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.md
+!README.md
+start-backend.bat
+start-frontend.bat

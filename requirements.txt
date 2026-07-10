@@ -1,38 +1,48 @@
 # Core AI
-anthropic>=0.40.0
-ollama>=0.4.0
-sentence-transformers>=3.0.0
-chromadb>=0.4.22
-tiktoken>=0.5.0
-
+anthropic
+ollama
+sentence-transformers
+transformers>=4.48  # gte-modernbert support
+chromadb
+posthog<6  # chromadb 1.5.x requires posthog<6.0.0; 6+/7+ change capture() and spam telemetry TypeErrors
+tiktoken
 # Hybrid search
-rank-bm25>=0.2.2
+bm25s>=0.2
+rank-bm25
 
 # Knowledge graph
-networkx>=3.0
+networkx
+spacy>=3.7  # LLM-free NER graph extraction; run: python -m spacy download en_core_web_sm
+
+# Learned query router
+scikit-learn
+joblib
+
+# AST-aware code chunking (tree-sitter based; falls back to regex chunking if absent)
+astchunk
 
 # Multimodal - PDF & Images
-PyMuPDF>=1.24.0
-Pillow>=10.2.0
+PyMuPDF
+Pillow
 
 # API
-fastapi>=0.109.0
-uvicorn>=0.27.0
-websockets>=12.0
-python-multipart>=0.0.6
+fastapi
+uvicorn
+websockets
+python-multipart
 
 # Auth
-bcrypt>=4.1.0
-PyJWT>=2.8.0
+bcrypt
+PyJWT
 
 # Utilities
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-rich>=13.7.0
-tenacity>=8.2.0
-requests>=2.31.0
+pydantic
+pydantic-settings
+rich
+tenacity
+requests
 
 # Web augmentation (gap-driven research)
-ddgs>=1.0
+ddgs
 
-# PageIndex-style local engine (no external dependencies — uses Claude + PyMuPDF)
+# PageIndex-style local engine (no external dependencies — uses Ollama + PyMuPDF)

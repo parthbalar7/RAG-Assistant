@@ -10,24 +10,18 @@ No external API needed. Uses your existing Anthropic API key.
 Inspired by the PageIndex framework (https://pageindex.ai).
 """
 
-import json
 import logging
 import os
 import shutil
-import time
 from pathlib import Path
-from typing import Optional, Union
 
 from config import settings
 from core.tree_indexer import (
+    delete_tree,
+    flatten_tree_nodes,
     generate_tree_index,
     get_stored_trees,
     get_tree_by_id,
-    delete_tree,
-    flatten_tree_nodes,
-    tree_to_outline,
-    extract_pages,
-    TREES_DIR,
 )
 from core.tree_search import tree_search_query
 
@@ -42,16 +36,23 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 #  Availability
 # ═══════════════════════════════════════════
 
+
 def is_available() -> bool:
-    """Local engine is available if Anthropic key is set and feature enabled."""
-    return settings.pageindex_enabled and bool(settings.anthropic_api_key)
+    """Local engine is available if feature enabled and an LLM backend is configured."""
+    if not settings.pageindex_enabled:
+        return False
+    # Works with any backend (Ollama or Anthropic) via llm_client
+    if settings.llm_backend == "ollama":
+        return True
+    return bool(settings.anthropic_api_key)
 
 
 # ═══════════════════════════════════════════
 #  Document Management
 # ═══════════════════════════════════════════
 
-def submit_document(filepath: str, mode: str = None) -> dict:
+
+def submit_document(filepath: str, mode: str | None = None) -> dict:
     """Process a PDF: copy to uploads dir, generate tree index.
     Returns: {"doc_id": "local-xxx", "status": "completed", "filename": "..."}
     """
@@ -73,6 +74,7 @@ def submit_document(filepath: str, mode: str = None) -> dict:
         "status": "completed",
         "total_pages": tree.get("total_pages", 0),
         "title": tree.get("title", filename),
+        "summaries_enriched": bool(tree.get("summaries_enriched", False)),
     }
 
 
@@ -85,6 +87,7 @@ def get_document_status(doc_id: str) -> dict:
             "status": "completed",
             "total_pages": tree.get("total_pages", 0),
             "title": tree.get("title", ""),
+            "summaries_enriched": bool(tree.get("summaries_enriched", False)),
         }
     return {"doc_id": doc_id, "status": "not_found"}
 
@@ -102,13 +105,14 @@ def get_document_metadata(doc_id: str) -> dict:
         "created_at": tree.get("created_at", ""),
         "generation_time_s": tree.get("generation_time_s", 0),
         "node_count": len(flatten_tree_nodes(tree.get("nodes", []))),
+        "summaries_enriched": bool(tree.get("summaries_enriched", False)),
     }
 
 
 def list_documents(limit: int = 50, offset: int = 0) -> dict:
     trees = get_stored_trees()
     return {
-        "documents": trees[offset:offset + limit],
+        "documents": trees[offset : offset + limit],
         "total": len(trees),
     }
 
@@ -121,6 +125,7 @@ def delete_document(doc_id: str) -> dict:
 # ═══════════════════════════════════════════
 #  Tree Access
 # ═══════════════════════════════════════════
+
 
 def get_tree(doc_id: str, include_summary: bool = False) -> list:
     """Get the hierarchical tree nodes for a document."""
@@ -152,14 +157,14 @@ def get_ocr_results(doc_id: str, fmt: str = "page") -> dict:
         for node in nodes:
             sp = node.get("start_page", 1)
             ep = node.get("end_page", sp)
-            text = "\n".join(
-                p["text"] for p in pages if sp <= p["page"] <= ep
+            text = "\n".join(p["text"] for p in pages if sp <= p["page"] <= ep)
+            node_texts.append(
+                {
+                    "node_id": node["node_id"],
+                    "title": node["title"],
+                    "text": text,
+                }
             )
-            node_texts.append({
-                "node_id": node["node_id"],
-                "title": node["title"],
-                "text": text,
-            })
         return {"doc_id": doc_id, "format": "node", "nodes": node_texts}
     else:  # page
         return {"doc_id": doc_id, "format": "page", "pages": pages}
@@ -169,13 +174,14 @@ def get_ocr_results(doc_id: str, fmt: str = "page") -> dict:
 #  Chat / Query — Reasoning-based Retrieval
 # ═══════════════════════════════════════════
 
+
 def chat_query(
     query: str,
-    doc_id: Union[str, list, None] = None,
-    conversation_history: list = None,
+    doc_id: str | list | None = None,
+    conversation_history: list | None = None,
     enable_citations: bool = False,
-    temperature: float = None,
-    search_query: str = None,
+    temperature: float | None = None,
+    search_query: str | None = None,
 ) -> dict:
     """Query documents using LLM tree search (non-streaming).
 
@@ -224,10 +230,10 @@ def chat_query(
 
 def chat_query_stream(
     query: str,
-    doc_id: Union[str, list, None] = None,
-    conversation_history: list = None,
+    doc_id: str | list | None = None,
+    conversation_history: list | None = None,
     enable_citations: bool = False,
-    temperature: float = None,
+    temperature: float | None = None,
 ):
     """Streaming tree search. Yields SSE dicts."""
     if not doc_id:
@@ -260,13 +266,14 @@ def chat_query_stream(
 #  Legacy Retrieval (returns raw nodes)
 # ═══════════════════════════════════════════
 
+
 def retrieve_and_wait(doc_id: str, query: str, thinking: bool = False, timeout: int = 60) -> dict:
     """Retrieve relevant tree nodes without generating an answer."""
     tree = get_tree_by_id(doc_id)
     if not tree:
         raise ValueError(f"No tree index found for {doc_id}")
 
-    from core.tree_search import navigate_tree, extract_content_for_nodes
+    from core.tree_search import extract_content_for_nodes, navigate_tree
 
     nav = navigate_tree(query, tree)
     selected = nav.get("selected_nodes", [])
@@ -294,12 +301,13 @@ def retrieve_and_wait(doc_id: str, query: str, thinking: bool = False, timeout: 
 #  Markdown → Tree
 # ═══════════════════════════════════════════
 
+
 def markdown_to_tree(filepath: str) -> dict:
     """Convert a markdown file to a tree structure based on headings."""
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"Not found: {filepath}")
 
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         content = f.read()
 
     lines = content.split("\n")
@@ -310,7 +318,7 @@ def markdown_to_tree(filepath: str) -> dict:
         match = None
         for level in range(1, 7):
             if line.startswith("#" * level + " "):
-                match = (level, line[level + 1:].strip())
+                match = (level, line[level + 1 :].strip())
                 break
 
         if match:

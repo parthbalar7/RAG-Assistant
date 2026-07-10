@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Second interrogative words that signal a new sub-question
 _INTERROGATIVES = {"how", "where", "what", "when", "why", "which", "who", "is", "are", "does", "do", "can"}
 
-_AND_RE = re.compile(r'\b(and|also)\b', re.IGNORECASE)
+_AND_RE = re.compile(r"\b(and|also)\b", re.IGNORECASE)
 
 
 def is_multi_part(query: str) -> bool:
@@ -90,6 +89,10 @@ Rules:
 Example input:  "how does auth work and where are tokens stored and how long do they last?"
 Example output: ["How does authentication work?", "Where are JWT tokens stored?", "What is the JWT token expiry duration?"]"""
 
+# Ollama structured-output schema matching the array-of-strings _parse_sub_queries
+# expects; ignored on Anthropic, fail-open parsing below stays as the safety net.
+_DECOMPOSE_SCHEMA = {"type": "array", "items": {"type": "string"}}
+
 
 def decompose(query: str, max_sub_queries: int = 5) -> list[str]:
     """
@@ -103,7 +106,7 @@ def decompose(query: str, max_sub_queries: int = 5) -> list[str]:
     """
     from core import llm_client
 
-    def _call(model: Optional[str]) -> str:
+    def _call(model: str | None) -> str:
         return llm_client.chat(
             messages=[{"role": "user", "content": query.strip()}],
             system=_DECOMPOSE_SYSTEM,
@@ -111,11 +114,12 @@ def decompose(query: str, max_sub_queries: int = 5) -> list[str]:
             max_tokens=200,
             temperature=0.0,
             stream=False,
+            json_schema=_DECOMPOSE_SCHEMA,
         )
 
     # Try lightweight memory model first, fall back to the active chat model
     memory_model = llm_client.get_memory_model()
-    chat_model   = llm_client.get_model()
+    chat_model = llm_client.get_model()
 
     try:
         raw = _call(memory_model)
@@ -124,18 +128,19 @@ def decompose(query: str, max_sub_queries: int = 5) -> list[str]:
         # Model not found or unavailable — retry with the main chat model
         if "not found" in err_str or "404" in err_str or "no such" in err_str:
             if memory_model != chat_model:
-                logger.info("Memory model '{}' unavailable for decomposition, retrying with '{}'".format(
-                    memory_model, chat_model))
+                logger.info(
+                    f"Memory model '{memory_model}' unavailable for decomposition, retrying with '{chat_model}'"
+                )
                 try:
                     raw = _call(chat_model)
                 except Exception as e2:
-                    logger.warning("Decomposition fallback also failed: {}".format(e2))
+                    logger.warning(f"Decomposition fallback also failed: {e2}")
                     return [query]
             else:
-                logger.warning("Decomposition LLM call failed: {}".format(e))
+                logger.warning(f"Decomposition LLM call failed: {e}")
                 return [query]
         else:
-            logger.warning("Decomposition LLM call failed: {}".format(e))
+            logger.warning(f"Decomposition LLM call failed: {e}")
             return [query]
 
     sub_queries = _parse_sub_queries(raw, query)
@@ -144,7 +149,7 @@ def decompose(query: str, max_sub_queries: int = 5) -> list[str]:
     if not sub_queries:
         return [query]
 
-    logger.info("Decomposed into {} sub-queries: {}".format(len(sub_queries), sub_queries))
+    logger.info(f"Decomposed into {len(sub_queries)} sub-queries: {sub_queries}")
     return sub_queries
 
 
@@ -165,7 +170,7 @@ def _parse_sub_queries(text: str, fallback: str) -> list[str]:
         pass
 
     # Try to extract first JSON array from the text
-    m = re.search(r'\[.*\]', text, re.DOTALL)
+    m = re.search(r"\[.*\]", text, re.DOTALL)
     if m:
         try:
             obj = json.loads(m.group())
@@ -175,8 +180,8 @@ def _parse_sub_queries(text: str, fallback: str) -> list[str]:
             pass
 
     # Last resort: split on numbered list lines  "1. ..." / "- ..."
-    lines = [re.sub(r'^[\d\.\-\*\s]+', '', l).strip() for l in text.splitlines()]
-    lines = [l for l in lines if len(l) > 8]
+    lines = [re.sub(r"^[\d\.\-\*\s]+", "", ln).strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if len(ln) > 8]
     if lines:
         return lines
 
@@ -184,6 +189,7 @@ def _parse_sub_queries(text: str, fallback: str) -> list[str]:
 
 
 # ── retrieval merger ──────────────────────────────────────────────────────────
+
 
 def merge_hits(hits_per_query: list[list[dict]], max_total: int = 12) -> list[dict]:
     """

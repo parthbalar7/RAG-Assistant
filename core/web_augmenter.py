@@ -17,25 +17,25 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_RESULTS   = 4      # DDG results to fetch
-FETCH_TIMEOUT = 8      # seconds per HTTP request
+MAX_RESULTS = 4  # DDG results to fetch
+FETCH_TIMEOUT = 8  # seconds per HTTP request
 MAX_PAGE_CHARS = 30_000  # chars to keep per page before chunking
 
 
 @dataclass
 class AugmentResult:
     topic: str
-    urls_fetched: list[str]   = field(default_factory=list)
-    urls_failed: list[str]    = field(default_factory=list)
-    chunks_added: int         = 0
-    error: Optional[str]      = None
+    urls_fetched: list[str] = field(default_factory=list)
+    urls_failed: list[str] = field(default_factory=list)
+    chunks_added: int = 0
+    error: str | None = None
 
 
 # ── search ────────────────────────────────────────────────────────────────────
+
 
 def _ddg_search(topic: str, max_results: int = MAX_RESULTS) -> list[dict]:
     """Return list of {title, href, body} from DuckDuckGo text search."""
@@ -47,28 +47,27 @@ def _ddg_search(topic: str, max_results: int = MAX_RESULTS) -> list[dict]:
         with DDGS() as ddgs:
             results = list(ddgs.text(topic, max_results=max_results))
         return results
-    except ImportError:
-        raise RuntimeError(
-            "ddgs is not installed. "
-            "Add 'ddgs>=1.0' to requirements.txt and rebuild."
-        )
+    except ImportError as ie:
+        raise RuntimeError("ddgs is not installed. Add 'ddgs>=1.0' to requirements.txt and rebuild.") from ie
     except Exception as e:
-        logger.warning("DDG search failed for '{}': {}".format(topic, e))
+        logger.warning(f"DDG search failed for '{topic}': {e}")
         return []
 
 
 # ── fetch + strip ─────────────────────────────────────────────────────────────
 
-def _fetch_text(url: str) -> Optional[str]:
+
+def _fetch_text(url: str) -> str | None:
     """Fetch a URL and return clean plain text, or None on failure."""
     try:
         import requests
+
         headers = {"User-Agent": "Mozilla/5.0 (compatible; RAGv2-bot/1.0)"}
         resp = requests.get(url, timeout=FETCH_TIMEOUT, headers=headers)
         resp.raise_for_status()
         raw_html = resp.text
     except Exception as e:
-        logger.warning("Fetch failed for {}: {}".format(url, e))
+        logger.warning(f"Fetch failed for {url}: {e}")
         return None
 
     return _html_to_text(raw_html)[:MAX_PAGE_CHARS]
@@ -81,8 +80,7 @@ def _html_to_text(html: str) -> str:
     # Remove all remaining tags
     html = re.sub(r"<[^>]+>", " ", html)
     # Decode common HTML entities
-    for ent, ch in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
-                    ("&quot;", '"'), ("&#39;", "'"), ("&nbsp;", " ")]:
+    for ent, ch in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"), ("&nbsp;", " ")]:
         html = html.replace(ent, ch)
     # Collapse whitespace
     html = re.sub(r"\s{2,}", "\n", html)
@@ -91,6 +89,7 @@ def _html_to_text(html: str) -> str:
 
 # ── chunk + ingest ────────────────────────────────────────────────────────────
 
+
 def _ingest_text(text: str, url: str, topic: str, store) -> int:
     """Chunk raw text and upsert into VectorStore. Returns chunks added."""
     from core.ingestion import Document, chunk_document
@@ -98,7 +97,7 @@ def _ingest_text(text: str, url: str, topic: str, store) -> int:
     # Wrap as a Document so existing chunker handles it
     doc = Document(
         content=text,
-        filepath="web:{}".format(url),
+        filepath=f"web:{url}",
         language="text",
         metadata={"source": "web", "url": url, "topic": topic, "fetched_at": time.time()},
     )
@@ -111,6 +110,7 @@ def _ingest_text(text: str, url: str, topic: str, store) -> int:
 
 # ── public entry point ────────────────────────────────────────────────────────
 
+
 def augment(topic: str, store, query: str = "") -> AugmentResult:
     """
     Search the web for *topic*, fetch pages, chunk, and ingest into *store*.
@@ -119,11 +119,11 @@ def augment(topic: str, store, query: str = "") -> AugmentResult:
     search_query = query if query else topic
     result = AugmentResult(topic=topic)
 
-    logger.info("Web augment: searching for '{}'".format(search_query))
+    logger.info(f"Web augment: searching for '{search_query}'")
     search_hits = _ddg_search(search_query, max_results=MAX_RESULTS)
 
     if not search_hits:
-        result.error = "No search results returned for '{}'.".format(topic)
+        result.error = f"No search results returned for '{topic}'."
         logger.warning(result.error)
         return result
 
@@ -142,15 +142,14 @@ def augment(topic: str, store, query: str = "") -> AugmentResult:
             if added > 0:
                 result.urls_fetched.append(url)
                 result.chunks_added += added
-                logger.info("Ingested {} chunks from {}".format(added, url))
+                logger.info(f"Ingested {added} chunks from {url}")
             else:
                 result.urls_failed.append(url)
         except Exception as e:
-            logger.warning("Ingest failed for {}: {}".format(url, e))
+            logger.warning(f"Ingest failed for {url}: {e}")
             result.urls_failed.append(url)
 
     if result.chunks_added == 0:
-        result.error = "Fetched {} page(s) but could not extract usable content.".format(
-            len(search_hits))
+        result.error = f"Fetched {len(search_hits)} page(s) but could not extract usable content."
 
     return result
